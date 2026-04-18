@@ -18,6 +18,7 @@ from PySide6.QtWidgets import (
     QTreeWidgetItem,
 )
 
+from pyssp_interface.diagram_view import DiagramView
 from pyssp_interface.services.project_service import SSPProjectService
 from pyssp_interface.state.project_state import (
     ComponentSummary,
@@ -46,6 +47,8 @@ class MainWindow(QMainWindow):
         self.details_panel = QPlainTextEdit()
         self.details_panel.setReadOnly(True)
         self.details_panel.setPlaceholderText("Select a project item to inspect its details.")
+        self.diagram_view = DiagramView()
+        self.diagram_view.pathActivated.connect(self._select_tree_path_from_diagram)
 
         self.variable_table = self._create_table(
             ["FMU", "Name", "Causality", "Variability", "Type", "Description"]
@@ -67,6 +70,7 @@ class MainWindow(QMainWindow):
 
         self.explorer_tabs = QTabWidget()
         self.explorer_tabs.addTab(self.details_panel, "Overview")
+        self.explorer_tabs.addTab(self.diagram_view, "Diagram")
         self.explorer_tabs.addTab(self.variable_table, "Variables")
         self.explorer_tabs.addTab(self.structure_tabs, "Structure")
 
@@ -349,6 +353,8 @@ class MainWindow(QMainWindow):
         self._populate_structure(snapshot.components, snapshot.connectors, snapshot.connections)
         self._populate_validation(snapshot)
         self.details_panel.setPlainText(self._format_project_summary(snapshot))
+        self.diagram_view.render_system(snapshot.structure_tree)
+        self.diagram_view.set_highlighted_path(snapshot.structure_tree.path if snapshot.structure_tree else None)
         self.explorer_tabs.setCurrentWidget(self.details_panel)
 
     def _populate_tree(self, snapshot: ProjectSnapshot) -> None:
@@ -546,22 +552,30 @@ class MainWindow(QMainWindow):
                 self.project.connectors,
                 self.project.connections,
             )
+            self.diagram_view.render_system(self.project.structure_tree)
+            self.diagram_view.set_highlighted_path(
+                self.project.structure_tree.path if self.project.structure_tree else None
+            )
             self.explorer_tabs.setCurrentWidget(self.details_panel)
             return
 
         if kind == "resources":
             self.details_panel.setPlainText(f"{len(self.project.resources)} resources")
+            self.diagram_view.set_highlighted_path(None)
             self.explorer_tabs.setCurrentWidget(self.details_panel)
             return
 
         if kind == "resource":
             self.details_panel.setPlainText(payload.get("details", ""))
+            self.diagram_view.set_highlighted_path(None)
             self.explorer_tabs.setCurrentWidget(self.details_panel)
             return
 
         if kind == "fmus":
             self.details_panel.setPlainText(f"{len(self.project.fmus)} FMUs")
             self._populate_variables(self.project.fmus)
+            self.diagram_view.render_system(self.project.structure_tree)
+            self.diagram_view.set_highlighted_path(None)
             self.explorer_tabs.setCurrentWidget(self.variable_table)
             return
 
@@ -586,6 +600,8 @@ class MainWindow(QMainWindow):
                         for variable in fmu.variables
                     ],
                 )
+                self.diagram_view.render_system(self.project.structure_tree)
+                self.diagram_view.set_highlighted_path(None)
                 self.explorer_tabs.setCurrentWidget(self.variable_table)
             return
 
@@ -624,6 +640,9 @@ class MainWindow(QMainWindow):
                         if connector.owner_path == node.path
                     ],
                 )
+                parent_system = self._find_parent_system(node.path)
+                self.diagram_view.render_system(parent_system)
+                self.diagram_view.set_highlighted_path(node.path)
                 self.explorer_tabs.setCurrentWidget(self.structure_tabs)
                 self.structure_tabs.setCurrentWidget(self.component_table)
             return
@@ -657,6 +676,8 @@ class MainWindow(QMainWindow):
                         for connection in node.connections
                     ],
                 )
+                self.diagram_view.render_system(node)
+                self.diagram_view.set_highlighted_path(node.path)
                 self.explorer_tabs.setCurrentWidget(self.structure_tabs)
                 self.structure_tabs.setCurrentWidget(self.connector_table)
             return
@@ -680,8 +701,15 @@ class MainWindow(QMainWindow):
                         for connector in (node.connectors if node else [])
                     ],
                 )
+                diagram_node = (
+                    node if node and node.node_kind == "system" else self._find_parent_system(owner_path)
+                )
+                self.diagram_view.render_system(diagram_node)
+                self.diagram_view.set_highlighted_path(owner_path)
             else:
                 self.details_panel.setPlainText(f"{len(self.project.connectors)} connectors")
+                self.diagram_view.render_system(self.project.structure_tree)
+                self.diagram_view.set_highlighted_path(None)
             self.explorer_tabs.setCurrentWidget(self.structure_tabs)
             self.structure_tabs.setCurrentWidget(self.connector_table)
             return
@@ -708,6 +736,8 @@ class MainWindow(QMainWindow):
                         connector.type_name or "",
                     ]],
                 )
+                self.diagram_view.render_system(self._find_parent_system(payload.get("owner_path")))
+                self.diagram_view.set_highlighted_path(payload.get("owner_path"))
                 self.explorer_tabs.setCurrentWidget(self.structure_tabs)
                 self.structure_tabs.setCurrentWidget(self.connector_table)
             return
@@ -730,8 +760,15 @@ class MainWindow(QMainWindow):
                         for connection in (node.connections if node else [])
                     ],
                 )
+                diagram_node = (
+                    node if node and node.node_kind == "system" else self._find_parent_system(owner_path)
+                )
+                self.diagram_view.render_system(diagram_node)
+                self.diagram_view.set_highlighted_path(owner_path)
             else:
                 self.details_panel.setPlainText(f"{len(self.project.connections)} connections")
+                self.diagram_view.render_system(self.project.structure_tree)
+                self.diagram_view.set_highlighted_path(None)
             self.explorer_tabs.setCurrentWidget(self.structure_tabs)
             self.structure_tabs.setCurrentWidget(self.connection_table)
             return
@@ -763,6 +800,8 @@ class MainWindow(QMainWindow):
                         connection.end_connector,
                     ]],
                 )
+                self.diagram_view.render_system(self._find_structure_node(payload.get("owner_path")))
+                self.diagram_view.set_highlighted_path(payload.get("owner_path"))
                 self.explorer_tabs.setCurrentWidget(self.structure_tabs)
                 self.structure_tabs.setCurrentWidget(self.connection_table)
 
@@ -811,6 +850,43 @@ class MainWindow(QMainWindow):
             return None
 
         return visit(self.project.structure_tree)
+
+    def _find_parent_system(self, path: str | None) -> StructureNode | None:
+        if self.project is None or self.project.structure_tree is None:
+            return None
+        if not path:
+            return self.project.structure_tree
+
+        node = self._find_structure_node(path)
+        if node is not None and node.node_kind == "system":
+            return node
+
+        parent_path = path.rsplit("/", 1)[0] if "/" in path else None
+        return self._find_structure_node(parent_path) if parent_path else self.project.structure_tree
+
+    def _select_tree_path_from_diagram(self, path: str) -> None:
+        item = self._find_tree_item_by_path(path)
+        if item is None:
+            return
+        self.project_tree.setCurrentItem(item)
+        self.explorer_tabs.setCurrentWidget(self.diagram_view)
+
+    def _find_tree_item_by_path(self, path: str) -> QTreeWidgetItem | None:
+        for index in range(self.project_tree.topLevelItemCount()):
+            found = self._visit_tree_item(self.project_tree.topLevelItem(index), path)
+            if found is not None:
+                return found
+        return None
+
+    def _visit_tree_item(self, item: QTreeWidgetItem, path: str) -> QTreeWidgetItem | None:
+        payload = item.data(0, Qt.UserRole) or {}
+        if payload.get("path") == path:
+            return item
+        for index in range(item.childCount()):
+            found = self._visit_tree_item(item.child(index), path)
+            if found is not None:
+                return found
+        return None
 
     def _connection_endpoint_items(self) -> list[str]:
         if self.project is None:
