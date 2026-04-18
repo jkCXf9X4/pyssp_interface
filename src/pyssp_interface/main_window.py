@@ -5,6 +5,7 @@ from pathlib import Path
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QFileDialog,
+    QInputDialog,
     QListWidget,
     QMainWindow,
     QMessageBox,
@@ -86,6 +87,7 @@ class MainWindow(QMainWindow):
 
     def _build_menu(self) -> None:
         file_menu = self.menuBar().addMenu("&File")
+        authoring_menu = self.menuBar().addMenu("&Authoring")
         sample_menu = self.menuBar().addMenu("&Samples")
 
         new_action = file_menu.addAction("New Project...")
@@ -104,6 +106,15 @@ class MainWindow(QMainWindow):
 
         exit_action = file_menu.addAction("Exit")
         exit_action.triggered.connect(self.close)
+
+        add_component_action = authoring_menu.addAction("Add Selected FMU As Component")
+        add_component_action.triggered.connect(self._add_selected_fmu_as_component)
+        add_system_connector_action = authoring_menu.addAction("Add System Connector...")
+        add_system_connector_action.triggered.connect(self._add_system_connector)
+        add_connection_action = authoring_menu.addAction("Add Connection...")
+        add_connection_action.triggered.connect(self._add_connection)
+        remove_connection_action = authoring_menu.addAction("Remove Selected Connection")
+        remove_connection_action.triggered.connect(self._remove_selected_connection)
 
         embrace_action = sample_menu.addAction("Open Embrace Sample")
         embrace_action.triggered.connect(
@@ -171,6 +182,164 @@ class MainWindow(QMainWindow):
         self._load_snapshot(self.project_service.open_project(project_path))
         self.statusBar().showMessage(f"Opened {project_path}")
 
+    def _add_selected_fmu_as_component(self) -> None:
+        if self.project is None:
+            QMessageBox.information(self, "No project", "Create or open an SSP project first.")
+            return
+
+        resource_name = self._selected_fmu_resource_name()
+        if resource_name is None:
+            QMessageBox.information(
+                self,
+                "No FMU selected",
+                "Select an FMU under the FMUs or Resources section first.",
+            )
+            return
+
+        try:
+            snapshot = self.project_service.add_component_from_fmu(
+                self.project.project_path,
+                resource_name,
+            )
+        except Exception as exc:
+            QMessageBox.critical(self, "Add component failed", str(exc))
+            return
+
+        self._load_snapshot(snapshot)
+        self.statusBar().showMessage(f"Added component from {resource_name}")
+
+    def _add_system_connector(self) -> None:
+        if self.project is None:
+            QMessageBox.information(self, "No project", "Create or open an SSP project first.")
+            return
+
+        name, ok = QInputDialog.getText(self, "Add System Connector", "Connector name:")
+        if not ok or not name.strip():
+            return
+
+        kind, ok = QInputDialog.getItem(
+            self,
+            "Add System Connector",
+            "Connector kind:",
+            ["input", "output", "parameter", "calculatedParameter"],
+            editable=False,
+        )
+        if not ok:
+            return
+
+        type_name, ok = QInputDialog.getItem(
+            self,
+            "Add System Connector",
+            "Connector type:",
+            ["Real", "Integer", "Boolean", "String"],
+            editable=False,
+        )
+        if not ok:
+            return
+
+        try:
+            snapshot = self.project_service.add_system_connector(
+                self.project.project_path,
+                name=name,
+                kind=kind,
+                type_name=type_name,
+            )
+        except Exception as exc:
+            QMessageBox.critical(self, "Add connector failed", str(exc))
+            return
+
+        self._load_snapshot(snapshot)
+        self.statusBar().showMessage(f"Added system connector {name}")
+
+    def _add_connection(self) -> None:
+        if self.project is None:
+            QMessageBox.information(self, "No project", "Create or open an SSP project first.")
+            return
+
+        endpoint_items = self._connection_endpoint_items()
+        if len(endpoint_items) < 2:
+            QMessageBox.information(
+                self,
+                "Not enough connectors",
+                "Add at least two connectors before creating a connection.",
+            )
+            return
+
+        start_label, ok = QInputDialog.getItem(
+            self,
+            "Add Connection",
+            "Start endpoint:",
+            endpoint_items,
+            editable=False,
+        )
+        if not ok:
+            return
+
+        end_label, ok = QInputDialog.getItem(
+            self,
+            "Add Connection",
+            "End endpoint:",
+            endpoint_items,
+            editable=False,
+        )
+        if not ok:
+            return
+
+        start_element, start_connector = self._parse_endpoint_label(start_label)
+        end_element, end_connector = self._parse_endpoint_label(end_label)
+        if (start_element, start_connector) == (end_element, end_connector):
+            QMessageBox.information(
+                self,
+                "Invalid connection",
+                "Start and end endpoints must be different.",
+            )
+            return
+
+        try:
+            snapshot = self.project_service.add_connection(
+                self.project.project_path,
+                start_element=start_element,
+                start_connector=start_connector,
+                end_element=end_element,
+                end_connector=end_connector,
+            )
+        except Exception as exc:
+            QMessageBox.critical(self, "Add connection failed", str(exc))
+            return
+
+        self._load_snapshot(snapshot)
+        self.statusBar().showMessage("Added connection")
+
+    def _remove_selected_connection(self) -> None:
+        if self.project is None:
+            QMessageBox.information(self, "No project", "Create or open an SSP project first.")
+            return
+
+        payload = self._current_tree_payload()
+        if payload.get("kind") != "connection":
+            QMessageBox.information(
+                self,
+                "No connection selected",
+                "Select a connection in the project tree first.",
+            )
+            return
+
+        start_element, start_connector, end_element, end_connector = payload["key"]
+        try:
+            snapshot = self.project_service.remove_connection(
+                self.project.project_path,
+                start_element=start_element,
+                start_connector=start_connector,
+                end_element=end_element,
+                end_connector=end_connector,
+            )
+        except Exception as exc:
+            QMessageBox.critical(self, "Remove connection failed", str(exc))
+            return
+
+        self._load_snapshot(snapshot)
+        self.statusBar().showMessage("Removed connection")
+
     def _load_snapshot(self, snapshot: ProjectSnapshot) -> None:
         self.project = snapshot
         self.setWindowTitle(f"pyssp_interface - {snapshot.project_name}")
@@ -197,6 +366,7 @@ class MainWindow(QMainWindow):
                 Qt.UserRole,
                 {
                     "kind": "resource",
+                    "name": resource.name,
                     "details": f"Resource\nname: {resource.name}\nkind: {resource.kind}",
                 },
             )
@@ -339,7 +509,7 @@ class MainWindow(QMainWindow):
         if not selected_items or self.project is None:
             return
 
-        payload = selected_items[0].data(0, Qt.UserRole) or {"kind": "unknown"}
+        payload = self._current_tree_payload()
         kind = payload.get("kind", "unknown")
 
         if kind == "project":
@@ -520,6 +690,43 @@ class MainWindow(QMainWindow):
             for col_index, value in enumerate(row):
                 table.setItem(row_index, col_index, QTableWidgetItem(value))
         table.resizeColumnsToContents()
+
+    def _selected_fmu_resource_name(self) -> str | None:
+        payload = self._current_tree_payload()
+        kind = payload.get("kind")
+        if kind == "fmu":
+            return payload.get("name")
+
+        if kind == "resource" and str(payload.get("name", "")).lower().endswith(".fmu"):
+            return payload.get("name")
+
+        return None
+
+    def _connection_endpoint_items(self) -> list[str]:
+        if self.project is None:
+            return []
+
+        return [
+            self._format_endpoint_label(connector.owner_name, connector.name)
+            for connector in self.project.connectors
+        ]
+
+    def _current_tree_payload(self) -> dict:
+        selected_items = self.project_tree.selectedItems()
+        if not selected_items:
+            return {}
+        return selected_items[0].data(0, Qt.UserRole) or {}
+
+    @staticmethod
+    def _format_endpoint_label(owner_name: str, connector_name: str) -> str:
+        return f"{owner_name}.{connector_name}"
+
+    @staticmethod
+    def _parse_endpoint_label(label: str) -> tuple[str | None, str]:
+        owner_name, connector_name = label.rsplit(".", 1)
+        if owner_name in {"system", "<system>"}:
+            return None, connector_name
+        return owner_name, connector_name
 
     @staticmethod
     def _format_project_summary(snapshot: ProjectSnapshot) -> str:
