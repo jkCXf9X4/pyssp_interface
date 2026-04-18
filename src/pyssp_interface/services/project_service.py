@@ -110,6 +110,7 @@ class SSPProjectService:
         resource_name: str,
         *,
         component_name: str | None = None,
+        system_path: str | None = None,
     ) -> ProjectSnapshot:
         project_path = Path(project_path)
 
@@ -133,7 +134,8 @@ class SSPProjectService:
                 if ssd.system is None:
                     ssd.system = System(None, "system")
 
-                component_name = self._unique_component_name(requested_name, ssd)
+                target_system_path, target_system = self._resolve_system_path_and_object(ssd, system_path)
+                component_name = self._unique_component_name(requested_name, target_system)
                 component = Component(None)
                 component.name = component_name
                 component.component_type = "application/x-fmu-sharedlibrary"
@@ -145,14 +147,14 @@ class SSPProjectService:
                         Connector(None, connector_name, connector_kind, connector_type)
                     )
                     self._add_or_reuse_system_connector_and_connection(
-                        ssd,
+                        target_system,
                         component_name=component_name,
                         connector_name=connector_name,
                         connector_kind=connector_kind,
                         connector_type=connector_type,
                     )
 
-                ssd.system.elements.append(component)
+                target_system.elements.append(component)
 
         return self.open_project(project_path)
 
@@ -163,6 +165,7 @@ class SSPProjectService:
         name: str,
         kind: str,
         type_name: str = "Real",
+        system_path: str | None = None,
     ) -> ProjectSnapshot:
         project_path = Path(project_path)
         normalized_kind = kind.strip()
@@ -175,11 +178,13 @@ class SSPProjectService:
                 if ssd.system is None:
                     ssd.system = System(None, "system")
 
-                if any(existing.name == normalized_name for existing in ssd.system.connectors):
+                _, target_system = self._resolve_system_path_and_object(ssd, system_path)
+
+                if any(existing.name == normalized_name for existing in target_system.connectors):
                     raise ValueError(f"System connector already exists: {normalized_name}")
 
                 connector_type = self._make_type(type_name)
-                ssd.system.connectors.append(
+                target_system.connectors.append(
                     Connector(None, normalized_name, normalized_kind, connector_type)
                 )
 
@@ -189,27 +194,48 @@ class SSPProjectService:
         self,
         project_path: Path | str,
         *,
+        system_path: str | None = None,
+        start_owner_path: str | None = None,
         start_element: str | None,
         start_connector: str,
+        end_owner_path: str | None = None,
         end_element: str | None,
         end_connector: str,
     ) -> ProjectSnapshot:
         project_path = Path(project_path)
-        connection = Connection(
-            start_element=start_element,
-            start_connector=start_connector,
-            end_element=end_element,
-            end_connector=end_connector,
-        )
 
         with SSP(project_path, mode="a") as ssp:
             with ssp.system_structure as ssd:
                 if ssd.system is None:
                     raise ValueError("Project has no system structure")
-                self._validate_connection_endpoints(ssd, connection)
-                if connection in ssd.system.connections:
+                target_system_path, target_system = self._resolve_system_path_and_object(ssd, system_path)
+                normalized_start_owner = self._normalize_owner_path(
+                    target_system_path,
+                    start_owner_path,
+                    start_element,
+                )
+                normalized_end_owner = self._normalize_owner_path(
+                    target_system_path,
+                    end_owner_path,
+                    end_element,
+                )
+                self._validate_connection_endpoints(
+                    target_system,
+                    target_system_path,
+                    normalized_start_owner,
+                    start_connector,
+                    normalized_end_owner,
+                    end_connector,
+                )
+                connection = Connection(
+                    start_element=self._owner_path_to_local_element(target_system_path, normalized_start_owner),
+                    start_connector=start_connector,
+                    end_element=self._owner_path_to_local_element(target_system_path, normalized_end_owner),
+                    end_connector=end_connector,
+                )
+                if connection in target_system.connections:
                     raise ValueError("Connection already exists")
-                ssd.system.connections.append(connection)
+                target_system.connections.append(connection)
 
         return self.open_project(project_path)
 
@@ -217,8 +243,11 @@ class SSPProjectService:
         self,
         project_path: Path | str,
         *,
+        system_path: str | None = None,
+        start_owner_path: str | None = None,
         start_element: str | None,
         start_connector: str,
+        end_owner_path: str | None = None,
         end_element: str | None,
         end_connector: str,
     ) -> ProjectSnapshot:
@@ -229,15 +258,26 @@ class SSPProjectService:
                 if ssd.system is None:
                     raise ValueError("Project has no system structure")
 
+                target_system_path, target_system = self._resolve_system_path_and_object(ssd, system_path)
+                normalized_start_owner = self._normalize_owner_path(
+                    target_system_path,
+                    start_owner_path,
+                    start_element,
+                )
+                normalized_end_owner = self._normalize_owner_path(
+                    target_system_path,
+                    end_owner_path,
+                    end_element,
+                )
                 connection = Connection(
-                    start_element=start_element,
+                    start_element=self._owner_path_to_local_element(target_system_path, normalized_start_owner),
                     start_connector=start_connector,
-                    end_element=end_element,
+                    end_element=self._owner_path_to_local_element(target_system_path, normalized_end_owner),
                     end_connector=end_connector,
                 )
-                if connection not in ssd.system.connections:
+                if connection not in target_system.connections:
                     raise ValueError("Connection does not exist")
-                ssd.system.connections.remove(connection)
+                target_system.connections.remove(connection)
 
         return self.open_project(project_path)
 
@@ -299,33 +339,39 @@ class SSPProjectService:
             return [f"SSD compliance check failed: {exc}"]
         return []
 
-    def _validate_connection_endpoints(self, ssd: SSD, connection: Connection) -> None:
-        valid_endpoints = self._collect_valid_endpoints(ssd.system)
+    def _validate_connection_endpoints(
+        self,
+        system: System,
+        system_path: str,
+        start_owner_path: str,
+        start_connector: str,
+        end_owner_path: str,
+        end_connector: str,
+    ) -> None:
+        valid_endpoints = self._collect_valid_endpoints(system, system_path)
 
-        start = (connection.start_element, connection.start_connector)
-        end = (connection.end_element, connection.end_connector)
+        start = (start_owner_path, start_connector)
+        end = (end_owner_path, end_connector)
         if start not in valid_endpoints:
             raise ValueError(
-                f"Unknown start endpoint: {connection.start_element or '<system>'}.{connection.start_connector}"
+                f"Unknown start endpoint: {start_owner_path}.{start_connector}"
             )
         if end not in valid_endpoints:
             raise ValueError(
-                f"Unknown end endpoint: {connection.end_element or '<system>'}.{connection.end_connector}"
+                f"Unknown end endpoint: {end_owner_path}.{end_connector}"
             )
 
-    def _collect_valid_endpoints(self, system: System) -> set[tuple[str | None, str]]:
-        endpoints = {(None, connector.name) for connector in system.connectors}
+    def _collect_valid_endpoints(self, system: System, system_path: str) -> set[tuple[str, str]]:
+        endpoints = {(system_path, connector.name) for connector in system.connectors}
         for element in system.elements:
-            if isinstance(element, System):
-                endpoints.update((element.name, connector.name) for connector in element.connectors)
-                endpoints.update(self._collect_valid_endpoints(element))
-            elif hasattr(element, "connectors"):
-                endpoints.update((element.name, connector.name) for connector in element.connectors)
+            if hasattr(element, "connectors"):
+                child_path = f"{system_path}/{element.name}"
+                endpoints.update((child_path, connector.name) for connector in element.connectors)
         return endpoints
 
     def _add_or_reuse_system_connector_and_connection(
         self,
-        ssd: SSD,
+        target_system: System,
         *,
         component_name: str,
         connector_name: str,
@@ -333,7 +379,7 @@ class SSPProjectService:
         connector_type,
     ) -> None:
         system_connector_name = self._choose_system_connector_name(
-            ssd,
+            target_system,
             component_name=component_name,
             connector_name=connector_name,
             connector_kind=connector_kind,
@@ -341,9 +387,9 @@ class SSPProjectService:
 
         if not any(
             existing.name == system_connector_name and existing.kind == connector_kind
-            for existing in ssd.system.connectors
+            for existing in target_system.connectors
         ):
-            ssd.system.connectors.append(
+            target_system.connectors.append(
                 Connector(None, system_connector_name, connector_kind, connector_type)
             )
 
@@ -364,28 +410,28 @@ class SSPProjectService:
         else:
             return
 
-        if connection not in ssd.system.connections:
-            ssd.system.connections.append(connection)
+        if connection not in target_system.connections:
+            target_system.connections.append(connection)
 
     def _choose_system_connector_name(
         self,
-        ssd: SSD,
+        target_system: System,
         *,
         component_name: str,
         connector_name: str,
         connector_kind: str,
     ) -> str:
-        if not any(existing.name == connector_name for existing in ssd.system.connectors):
+        if not any(existing.name == connector_name for existing in target_system.connectors):
             return connector_name
 
         if any(
             existing.name == connector_name and existing.kind == connector_kind
-            for existing in ssd.system.connectors
+            for existing in target_system.connectors
         ):
             return connector_name
 
         candidate = f"{component_name}.{connector_name}"
-        existing_names = {existing.name for existing in ssd.system.connectors}
+        existing_names = {existing.name for existing in target_system.connectors}
         if candidate not in existing_names:
             return candidate
 
@@ -397,10 +443,10 @@ class SSPProjectService:
             index += 1
 
     @staticmethod
-    def _unique_component_name(requested_name: str, ssd: SSD) -> str:
+    def _unique_component_name(requested_name: str, target_system: System) -> str:
         existing_names = {
             element.name
-            for element in ssd.system.elements
+            for element in target_system.elements
             if hasattr(element, "name") and element.name is not None
         }
         if requested_name not in existing_names:
@@ -412,6 +458,70 @@ class SSPProjectService:
             if candidate not in existing_names:
                 return candidate
             index += 1
+
+    def _resolve_system_path_and_object(
+        self,
+        ssd: SSD,
+        system_path: str | None,
+    ) -> tuple[str, System]:
+        if ssd.system is None:
+            raise ValueError("Project has no root system")
+
+        root_path = ssd.system.name or "system"
+        if system_path is None or system_path == root_path:
+            return root_path, ssd.system
+
+        found = self._find_system_by_path(ssd.system, current_path=root_path, target_path=system_path)
+        if found is None:
+            raise ValueError(f"Unknown system path: {system_path}")
+        return system_path, found
+
+    def _find_system_by_path(
+        self,
+        system: System,
+        *,
+        current_path: str,
+        target_path: str,
+    ) -> System | None:
+        if current_path == target_path:
+            return system
+        for element in system.elements:
+            if isinstance(element, System):
+                child_path = f"{current_path}/{element.name}"
+                found = self._find_system_by_path(
+                    element,
+                    current_path=child_path,
+                    target_path=target_path,
+                )
+                if found is not None:
+                    return found
+        return None
+
+    @staticmethod
+    def _normalize_owner_path(
+        system_path: str,
+        owner_path: str | None,
+        local_element: str | None,
+    ) -> str:
+        if owner_path:
+            return owner_path
+        if local_element is None:
+            return system_path
+        return f"{system_path}/{local_element}"
+
+    @staticmethod
+    def _owner_path_to_local_element(system_path: str, owner_path: str) -> str | None:
+        if owner_path == system_path:
+            return None
+        prefix = f"{system_path}/"
+        if owner_path.startswith(prefix):
+            remainder = owner_path[len(prefix):]
+            if "/" in remainder:
+                raise ValueError(
+                    f"Endpoint {owner_path} is not a direct child of system {system_path}"
+                )
+            return remainder
+        raise ValueError(f"Endpoint {owner_path} is not inside system {system_path}")
 
     def _build_structure_tree(self, system: System, *, path: str) -> StructureNode:
         node = StructureNode(

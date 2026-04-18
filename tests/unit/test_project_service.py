@@ -3,7 +3,13 @@ from __future__ import annotations
 from pathlib import Path
 import zipfile
 
+from pyssp_interface._vendor import ensure_vendor_paths
 from pyssp_interface.services.project_service import SSPProjectService
+
+ensure_vendor_paths()
+
+from pyssp_standard.ssd import Component, Connector, System
+from pyssp_standard.ssp import SSP
 
 
 RESOURCE_ROOT = Path("resources")
@@ -115,8 +121,11 @@ def test_add_system_connector_and_connection_round_trip(tmp_path):
     )
     snapshot = service.add_connection(
         project_path,
+        system_path="system",
+        start_owner_path="system",
         start_element=None,
         start_connector="driver_signal",
+        end_owner_path="system",
         end_element=None,
         end_connector="controller_input",
     )
@@ -130,8 +139,11 @@ def test_add_system_connector_and_connection_round_trip(tmp_path):
 
     snapshot = service.remove_connection(
         project_path,
+        system_path="system",
+        start_owner_path="system",
         start_element=None,
         start_connector="driver_signal",
+        end_owner_path="system",
         end_element=None,
         end_connector="controller_input",
     )
@@ -140,6 +152,56 @@ def test_add_system_connector_and_connection_round_trip(tmp_path):
         and connection.start_connector == "driver_signal"
         and connection.end_element is None
         and connection.end_connector == "controller_input"
+        for connection in snapshot.connections
+    )
+
+
+def test_nested_authoring_targets_selected_subsystem(tmp_path):
+    project_path = tmp_path / "nested-demo.ssp"
+    service = SSPProjectService()
+    root_path = "system"
+
+    service.create_project(project_path)
+    with SSP(project_path, mode="a") as ssp:
+        with ssp.system_structure as ssd:
+            nested = System(None, "SuT")
+            component = Component(None)
+            component.name = "emachine_model"
+            component.component_type = "application/x-fmu-sharedlibrary"
+            component.source = "resources/emachine_model.fmu"
+            component.implementation = "CoSimulation"
+            component.connectors.append(Connector(None, "U", "input"))
+            nested.elements.append(component)
+            ssd.system.elements.append(nested)
+
+    snapshot = service.add_system_connector(
+        project_path,
+        system_path=f"{root_path}/SuT",
+        name="nested_cmd",
+        kind="input",
+        type_name="Real",
+    )
+    assert any(
+        connector.owner_path == f"{root_path}/SuT" and connector.name == "nested_cmd"
+        for connector in snapshot.connectors
+    )
+
+    snapshot = service.add_connection(
+        project_path,
+        system_path=f"{root_path}/SuT",
+        start_owner_path=f"{root_path}/SuT",
+        start_element=None,
+        start_connector="nested_cmd",
+        end_owner_path=f"{root_path}/SuT/emachine_model",
+        end_element=None,
+        end_connector="U",
+    )
+    assert any(
+        connection.owner_path == f"{root_path}/SuT"
+        and connection.start_element is None
+        and connection.start_connector == "nested_cmd"
+        and connection.end_element == "emachine_model"
+        and connection.end_connector == "U"
         for connection in snapshot.connections
     )
 

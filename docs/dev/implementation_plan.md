@@ -34,6 +34,25 @@ The repository currently contains:
 
 This means the GUI should be implemented as an application layer on top of the library, not as a parallel SSP model implementation.
 
+## Current Implementation Status
+
+The repository is now past the original bootstrap stage.
+
+Implemented today:
+
+- packaged `src/` application with a repo-local `venv` workflow
+- `SSPProjectService` for open/create/import/edit operations
+- recursive `StructureNode` model for nested SSD structure
+- nested tree view tied to actual SSD ownership paths
+- subsystem-scoped diagram rendering
+- path-based nested authoring APIs for connectors, components, and connections
+
+Still in progress:
+
+- diagram-first editing workflows
+- persistent layout state per system scope
+- further modularization of orchestration logic out of `MainWindow`
+
 ## Proposed Product Scope
 
 The first useful product should focus on authoring and inspection, not on full simulation orchestration.
@@ -188,7 +207,7 @@ Implement the project through a small number of stable workstreams.
 
 ### Workstream 3: System Structure Editing
 
-- edit the root `SystemStructure.ssd`
+- edit `SystemStructure.ssd` at any system depth
 - add/remove components
 - create/edit connectors
 - create/edit/delete connections
@@ -353,6 +372,7 @@ Recommended implementation approach:
 
 - start with `QGraphicsScene` and `QGraphicsView`
 - represent SSP components as movable block items
+- represent nested `System` nodes as collapsed subsystem blocks in parent scopes
 - represent system connectors and FMU connectors as ports on those blocks
 - represent `Connection` objects as directed edges
 - keep editing commands routed through the same service/state layer used by non-visual editors
@@ -396,6 +416,14 @@ Mitigation:
 - keep `pyssp_standard` access in services/state adapters
 - avoid direct archive mutation from widgets
 
+### Risk: Root-only editing contracts
+
+Mitigation:
+
+- make all write operations accept `system_path`
+- use full owner paths for connection endpoints
+- treat nested authoring as a baseline capability, not a later extension
+
 ### Risk: Unclear write semantics for some SSP subformats
 
 Mitigation:
@@ -421,11 +449,11 @@ Mitigation:
 
 Recommended next implementation tasks:
 
-1. create Python package metadata and a `src/pyssp_interface` package
-2. choose and add `PySide6`
-3. build a minimal main window with project tree, details pane, and status/error panel
-4. implement an `SSPProjectService` that opens an SSP and exposes structured view models
-5. add fixture-based tests using sample SSP/FMU files already present under `3rd_party/pyssp_standard/pytest/doc`
+1. move more diagram interaction logic out of `MainWindow`
+2. add diagram-side connector selection and connection creation
+3. introduce layout state and persistence per system scope
+4. expand nested-authoring tests beyond service-level coverage
+5. deepen parameter binding and resource editing only after the diagram command path is stable
 
 ## Definition of Success for the First Release
 

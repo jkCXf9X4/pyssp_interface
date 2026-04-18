@@ -1,7 +1,12 @@
 # Documentation
 
-This repository is for a Python GUI application for building and working with SSP archives and FMUs on top of `pyssp_standard`.
+This repository contains a Python desktop application for inspecting and authoring SSP projects and FMUs on top of `pyssp_standard`.
 
-Available documents:
+## Start Here
 
-- [Getting started plan](dev/implementation_plan.md)
+- [Getting started](getting_started.md)
+
+## Developer Docs
+
+- [Implementation plan](dev/implementation_plan.md)
+- [Architecture](dev/architecture.md)
