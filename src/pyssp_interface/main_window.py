@@ -25,6 +25,7 @@ from pyssp_interface.state.project_state import (
     ConnectorSummary,
     FMUSummary,
     ProjectSnapshot,
+    StructureNode,
 )
 
 
@@ -379,61 +380,86 @@ class MainWindow(QMainWindow):
             child.setData(0, Qt.UserRole, {"kind": "fmu", "name": fmu.resource_name})
             fmus_item.addChild(child)
 
-        components_item = QTreeWidgetItem(["Components"])
-        components_item.setData(0, Qt.UserRole, {"kind": "components"})
-        for component in snapshot.components:
-            child = QTreeWidgetItem([component.name])
-            child.setData(0, Qt.UserRole, {"kind": "component", "name": component.name})
-            components_item.addChild(child)
-
-        connectors_item = QTreeWidgetItem(["Connectors"])
-        connectors_item.setData(0, Qt.UserRole, {"kind": "connectors"})
-        for connector in snapshot.connectors:
-            label = f"{connector.owner_name}.{connector.name}"
-            child = QTreeWidgetItem([label])
-            child.setData(
-                0,
-                Qt.UserRole,
-                {
-                    "kind": "connector",
-                    "owner_name": connector.owner_name,
-                    "name": connector.name,
-                },
-            )
-            connectors_item.addChild(child)
-
-        connections_item = QTreeWidgetItem(["Connections"])
-        connections_item.setData(0, Qt.UserRole, {"kind": "connections"})
-        for connection in snapshot.connections:
-            label = (
-                f"{connection.start_element or '<system>'}.{connection.start_connector} -> "
-                f"{connection.end_element or '<system>'}.{connection.end_connector}"
-            )
-            child = QTreeWidgetItem([label])
-            child.setData(
-                0,
-                Qt.UserRole,
-                {
-                    "kind": "connection",
-                    "key": (
-                        connection.start_element,
-                        connection.start_connector,
-                        connection.end_element,
-                        connection.end_connector,
-                    ),
-                },
-            )
-            connections_item.addChild(child)
-
         root.addChild(resources_item)
         root.addChild(fmus_item)
-        root.addChild(components_item)
-        root.addChild(connectors_item)
-        root.addChild(connections_item)
+        if snapshot.structure_tree is not None:
+            structure_root = self._build_structure_tree_item(snapshot.structure_tree)
+            root.addChild(structure_root)
         root.setExpanded(True)
-        for item in (resources_item, fmus_item, components_item, connectors_item, connections_item):
+        for item in (resources_item, fmus_item):
             item.setExpanded(True)
         self.project_tree.setCurrentItem(root)
+
+    def _build_structure_tree_item(self, node: StructureNode) -> QTreeWidgetItem:
+        if node.node_kind == "system":
+            label = f"System: {node.name}"
+        else:
+            label = f"Component: {node.name}"
+
+        item = QTreeWidgetItem([label])
+        item.setData(
+            0,
+            Qt.UserRole,
+            {
+                "kind": node.node_kind,
+                "path": node.path,
+                "name": node.name,
+            },
+        )
+
+        if node.connectors:
+            connectors_item = QTreeWidgetItem(["Connectors"])
+            connectors_item.setData(
+                0,
+                Qt.UserRole,
+                {"kind": "connectors", "owner_path": node.path, "owner_name": node.name},
+            )
+            for connector in node.connectors:
+                child = QTreeWidgetItem([f"{connector.name} [{connector.kind}]"])
+                child.setData(
+                    0,
+                    Qt.UserRole,
+                    {
+                        "kind": "connector",
+                        "owner_path": connector.owner_path,
+                        "owner_name": connector.owner_name,
+                        "name": connector.name,
+                    },
+                )
+                connectors_item.addChild(child)
+            item.addChild(connectors_item)
+
+        for child_node in node.children:
+            item.addChild(self._build_structure_tree_item(child_node))
+
+        if node.connections:
+            connections_item = QTreeWidgetItem(["Connections"])
+            connections_item.setData(
+                0,
+                Qt.UserRole,
+                {"kind": "connections", "owner_path": node.path, "owner_name": node.name},
+            )
+            for connection in node.connections:
+                child = QTreeWidgetItem([self._format_connection_line(connection)])
+                child.setData(
+                    0,
+                    Qt.UserRole,
+                    {
+                        "kind": "connection",
+                        "owner_path": connection.owner_path,
+                        "key": (
+                            connection.start_element,
+                            connection.start_connector,
+                            connection.end_element,
+                            connection.end_connector,
+                        ),
+                    },
+                )
+                connections_item.addChild(child)
+            item.addChild(connections_item)
+
+        item.setExpanded(True)
+        return item
 
     def _populate_validation(self, snapshot: ProjectSnapshot) -> None:
         self.validation_panel.clear()
@@ -570,11 +596,9 @@ class MainWindow(QMainWindow):
             return
 
         if kind == "component":
-            component = next(
-                (item for item in self.project.components if item.name == payload.get("name")),
-                None,
-            )
-            if component is not None:
+            node = self._find_structure_node(payload.get("path"))
+            component = next((item for item in self.project.components if item.name == payload.get("name")), None)
+            if component is not None and node is not None:
                 self.details_panel.setPlainText(self._format_component_summary(component))
                 self._set_table_rows(
                     self.component_table,
@@ -597,15 +621,67 @@ class MainWindow(QMainWindow):
                             connector.type_name or "",
                         ]
                         for connector in self.project.connectors
-                        if connector.owner_name == component.name
+                        if connector.owner_path == node.path
                     ],
                 )
                 self.explorer_tabs.setCurrentWidget(self.structure_tabs)
                 self.structure_tabs.setCurrentWidget(self.component_table)
             return
 
+        if kind == "system":
+            node = self._find_structure_node(payload.get("path"))
+            if node is not None:
+                self.details_panel.setPlainText(self._format_system_summary(node))
+                self._set_table_rows(
+                    self.connector_table,
+                    [
+                        [
+                            connector.owner_name,
+                            connector.owner_kind,
+                            connector.name,
+                            connector.kind,
+                            connector.type_name or "",
+                        ]
+                        for connector in node.connectors
+                    ],
+                )
+                self._set_table_rows(
+                    self.connection_table,
+                    [
+                        [
+                            connection.start_element or "<system>",
+                            connection.start_connector,
+                            connection.end_element or "<system>",
+                            connection.end_connector,
+                        ]
+                        for connection in node.connections
+                    ],
+                )
+                self.explorer_tabs.setCurrentWidget(self.structure_tabs)
+                self.structure_tabs.setCurrentWidget(self.connector_table)
+            return
+
         if kind == "connectors":
-            self.details_panel.setPlainText(f"{len(self.project.connectors)} connectors")
+            owner_path = payload.get("owner_path")
+            if owner_path:
+                node = self._find_structure_node(owner_path)
+                count = len(node.connectors) if node else 0
+                self.details_panel.setPlainText(f"{count} connectors in {payload.get('owner_name')}")
+                self._set_table_rows(
+                    self.connector_table,
+                    [
+                        [
+                            connector.owner_name,
+                            connector.owner_kind,
+                            connector.name,
+                            connector.kind,
+                            connector.type_name or "",
+                        ]
+                        for connector in (node.connectors if node else [])
+                    ],
+                )
+            else:
+                self.details_panel.setPlainText(f"{len(self.project.connectors)} connectors")
             self.explorer_tabs.setCurrentWidget(self.structure_tabs)
             self.structure_tabs.setCurrentWidget(self.connector_table)
             return
@@ -615,7 +691,7 @@ class MainWindow(QMainWindow):
                 (
                     item
                     for item in self.project.connectors
-                    if item.owner_name == payload.get("owner_name")
+                    if item.owner_path == payload.get("owner_path")
                     and item.name == payload.get("name")
                 ),
                 None,
@@ -637,7 +713,25 @@ class MainWindow(QMainWindow):
             return
 
         if kind == "connections":
-            self.details_panel.setPlainText(f"{len(self.project.connections)} connections")
+            owner_path = payload.get("owner_path")
+            if owner_path:
+                node = self._find_structure_node(owner_path)
+                count = len(node.connections) if node else 0
+                self.details_panel.setPlainText(f"{count} connections in {payload.get('owner_name')}")
+                self._set_table_rows(
+                    self.connection_table,
+                    [
+                        [
+                            connection.start_element or "<system>",
+                            connection.start_connector,
+                            connection.end_element or "<system>",
+                            connection.end_connector,
+                        ]
+                        for connection in (node.connections if node else [])
+                    ],
+                )
+            else:
+                self.details_panel.setPlainText(f"{len(self.project.connections)} connections")
             self.explorer_tabs.setCurrentWidget(self.structure_tabs)
             self.structure_tabs.setCurrentWidget(self.connection_table)
             return
@@ -647,7 +741,8 @@ class MainWindow(QMainWindow):
                 (
                     item
                     for item in self.project.connections
-                    if (
+                    if item.owner_path == payload.get("owner_path")
+                    and (
                         item.start_element,
                         item.start_connector,
                         item.end_element,
@@ -702,12 +797,27 @@ class MainWindow(QMainWindow):
 
         return None
 
+    def _find_structure_node(self, path: str | None) -> StructureNode | None:
+        if self.project is None or self.project.structure_tree is None or not path:
+            return None
+
+        def visit(node: StructureNode) -> StructureNode | None:
+            if node.path == path:
+                return node
+            for child in node.children:
+                found = visit(child)
+                if found is not None:
+                    return found
+            return None
+
+        return visit(self.project.structure_tree)
+
     def _connection_endpoint_items(self) -> list[str]:
         if self.project is None:
             return []
 
         return [
-            self._format_endpoint_label(connector.owner_name, connector.name)
+            self._format_endpoint_label(connector.owner_path, connector.name)
             for connector in self.project.connectors
         ]
 
@@ -718,31 +828,33 @@ class MainWindow(QMainWindow):
         return selected_items[0].data(0, Qt.UserRole) or {}
 
     @staticmethod
-    def _format_endpoint_label(owner_name: str, connector_name: str) -> str:
-        return f"{owner_name}.{connector_name}"
+    def _format_endpoint_label(owner_path: str, connector_name: str) -> str:
+        return f"{owner_path}.{connector_name}"
 
     @staticmethod
     def _parse_endpoint_label(label: str) -> tuple[str | None, str]:
         owner_name, connector_name = label.rsplit(".", 1)
+        owner_name = owner_name.split("/")[-1]
         if owner_name in {"system", "<system>"}:
             return None, connector_name
         return owner_name, connector_name
 
     @staticmethod
     def _format_project_summary(snapshot: ProjectSnapshot) -> str:
-        return "\n".join(
-            [
-                "Project",
-                f"path: {snapshot.project_path}",
-                f"system: {snapshot.system_name or '-'}",
-                f"resources: {len(snapshot.resources)}",
-                f"fmus: {len(snapshot.fmus)}",
-                f"components: {len(snapshot.components)}",
-                f"connectors: {len(snapshot.connectors)}",
-                f"connections: {len(snapshot.connections)}",
-                f"validation messages: {len(snapshot.validation_messages)}",
-            ]
-        )
+        lines = [
+            "Project",
+            f"path: {snapshot.project_path}",
+            f"system: {snapshot.system_name or '-'}",
+            f"resources: {len(snapshot.resources)}",
+            f"fmus: {len(snapshot.fmus)}",
+            f"components: {len(snapshot.components)}",
+            f"connectors: {len(snapshot.connectors)}",
+            f"connections: {len(snapshot.connections)}",
+            f"validation messages: {len(snapshot.validation_messages)}",
+        ]
+        if snapshot.structure_tree is not None:
+            lines.extend(["", "SSD layout:", MainWindow._format_structure_outline(snapshot.structure_tree)])
+        return "\n".join(lines)
 
     @staticmethod
     def _format_fmu_summary(fmu: FMUSummary) -> str:
@@ -796,7 +908,37 @@ class MainWindow(QMainWindow):
         return "\n".join(
             [
                 "Connection",
+                f"owner path: {connection.owner_path}",
                 f"source: {connection.start_element or '<system>'}.{connection.start_connector}",
                 f"target: {connection.end_element or '<system>'}.{connection.end_connector}",
             ]
         )
+
+    @staticmethod
+    def _format_connection_line(connection: ConnectionSummary) -> str:
+        return (
+            f"{connection.start_element or '<system>'}.{connection.start_connector} -> "
+            f"{connection.end_element or '<system>'}.{connection.end_connector}"
+        )
+
+    @staticmethod
+    def _format_system_summary(node: StructureNode) -> str:
+        return "\n".join(
+            [
+                "System",
+                f"name: {node.name}",
+                f"path: {node.path}",
+                f"child nodes: {len(node.children)}",
+                f"connectors: {len(node.connectors)}",
+                f"connections: {len(node.connections)}",
+            ]
+        )
+
+    @staticmethod
+    def _format_structure_outline(node: StructureNode, depth: int = 0) -> str:
+        indent = "  " * depth
+        label = f"{indent}- {node.node_kind}: {node.name}"
+        lines = [label]
+        for child in node.children:
+            lines.append(MainWindow._format_structure_outline(child, depth + 1))
+        return "\n".join(lines)

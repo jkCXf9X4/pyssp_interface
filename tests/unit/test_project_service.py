@@ -50,6 +50,9 @@ def test_open_project_reads_dcmotor_fixture():
     assert len(snapshot.fmus) == 3
     assert snapshot.components
     assert snapshot.connectors
+    assert snapshot.structure_tree is not None
+    assert snapshot.structure_tree.name == "DC-Motor"
+    assert any(child.node_kind == "system" and child.name == "SuT" for child in snapshot.structure_tree.children)
 
 
 def test_import_fmu_adds_resource_to_project(tmp_path):

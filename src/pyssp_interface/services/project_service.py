@@ -10,6 +10,7 @@ from pyssp_interface.state.project_state import (
     FMUSummary,
     ProjectSnapshot,
     ResourceSummary,
+    StructureNode,
     VariableSummary,
 )
 
@@ -54,6 +55,7 @@ class SSPProjectService:
         connections: list[ConnectionSummary] = []
         validation_messages: list[str] = []
         system_name: str | None = None
+        structure_tree: StructureNode | None = None
 
         with SSP(project_path, mode="r") as ssp:
             ssd = ssp.system_structure
@@ -65,27 +67,10 @@ class SSPProjectService:
 
             if ssd.system is not None:
                 system_name = ssd.system.name
-                connectors = self._summarize_connectors(ssd)
-                components = [
-                    ComponentSummary(
-                        name=element.name,
-                        source=element.source,
-                        component_type=element.component_type,
-                        implementation=element.implementation,
-                        connector_count=len(element.connectors),
-                    )
-                    for element in ssd.system.elements
-                    if hasattr(element, "component_type")
-                ]
-                connections = [
-                    ConnectionSummary(
-                        start_element=connection.start_element,
-                        start_connector=connection.start_connector,
-                        end_element=connection.end_element,
-                        end_connector=connection.end_connector,
-                    )
-                    for connection in ssd.connections()
-                ]
+                structure_tree = self._build_structure_tree(ssd.system, path=ssd.system.name or "system")
+                components = self._flatten_components(structure_tree)
+                connectors = self._flatten_connectors(structure_tree)
+                connections = self._flatten_connections(structure_tree)
 
                 validation_messages.extend(ssd.check_connections())
 
@@ -95,6 +80,7 @@ class SSPProjectService:
             project_path=project_path,
             project_name=project_path.name,
             system_name=system_name,
+            structure_tree=structure_tree,
             resources=resources,
             fmus=fmus,
             components=components,
@@ -314,14 +300,7 @@ class SSPProjectService:
         return []
 
     def _validate_connection_endpoints(self, ssd: SSD, connection: Connection) -> None:
-        valid_endpoints = {
-            (None, connector.name)
-            for connector in ssd.system.connectors
-        }
-        for element in ssd.system.elements:
-            if not hasattr(element, "connectors"):
-                continue
-            valid_endpoints.update((element.name, connector.name) for connector in element.connectors)
+        valid_endpoints = self._collect_valid_endpoints(ssd.system)
 
         start = (connection.start_element, connection.start_connector)
         end = (connection.end_element, connection.end_connector)
@@ -333,6 +312,16 @@ class SSPProjectService:
             raise ValueError(
                 f"Unknown end endpoint: {connection.end_element or '<system>'}.{connection.end_connector}"
             )
+
+    def _collect_valid_endpoints(self, system: System) -> set[tuple[str | None, str]]:
+        endpoints = {(None, connector.name) for connector in system.connectors}
+        for element in system.elements:
+            if isinstance(element, System):
+                endpoints.update((element.name, connector.name) for connector in element.connectors)
+                endpoints.update(self._collect_valid_endpoints(element))
+            elif hasattr(element, "connectors"):
+                endpoints.update((element.name, connector.name) for connector in element.connectors)
+        return endpoints
 
     def _add_or_reuse_system_connector_and_connection(
         self,
@@ -424,42 +413,91 @@ class SSPProjectService:
                 return candidate
             index += 1
 
-    def _summarize_connectors(self, ssd: SSD) -> list[ConnectorSummary]:
-        if ssd.system is None:
-            return []
+    def _build_structure_tree(self, system: System, *, path: str) -> StructureNode:
+        node = StructureNode(
+            path=path,
+            node_kind="system",
+            name=system.name or "<system>",
+        )
 
-        summaries: list[ConnectorSummary] = []
-        system_name = ssd.system.name or "<system>"
-
-        for connector in ssd.system.connectors:
-            summaries.append(
-                ConnectorSummary(
-                    owner_name=system_name,
-                    owner_kind="system",
-                    name=connector.name,
-                    kind=connector.kind,
-                    type_name=self._connector_type_name(connector),
-                )
+        node.connectors = [
+            ConnectorSummary(
+                owner_path=path,
+                owner_name=node.name,
+                owner_kind="system",
+                name=connector.name,
+                kind=connector.kind,
+                type_name=self._connector_type_name(connector),
             )
+            for connector in system.connectors
+        ]
+        node.connections = [
+            ConnectionSummary(
+                owner_path=path,
+                start_element=connection.start_element,
+                start_connector=connection.start_connector,
+                end_element=connection.end_element,
+                end_connector=connection.end_connector,
+            )
+            for connection in system.connections
+        ]
 
-        for element in ssd.system.elements:
-            if not hasattr(element, "connectors"):
-                continue
-
-            owner_name = getattr(element, "name", "<unnamed>")
-            owner_kind = "component" if hasattr(element, "component_type") else "system"
-            for connector in element.connectors:
-                summaries.append(
-                    ConnectorSummary(
-                        owner_name=owner_name,
-                        owner_kind=owner_kind,
-                        name=connector.name,
-                        kind=connector.kind,
-                        type_name=self._connector_type_name(connector),
+        for element in system.elements:
+            child_path = f"{path}/{getattr(element, 'name', '<unnamed>')}"
+            if isinstance(element, System):
+                node.children.append(self._build_structure_tree(element, path=child_path))
+            elif isinstance(element, Component):
+                node.children.append(
+                    StructureNode(
+                        path=child_path,
+                        node_kind="component",
+                        name=element.name or "<unnamed>",
+                        source=element.source,
+                        component_type=element.component_type,
+                        implementation=element.implementation,
+                        connectors=[
+                            ConnectorSummary(
+                                owner_path=child_path,
+                                owner_name=element.name or "<unnamed>",
+                                owner_kind="component",
+                                name=connector.name,
+                                kind=connector.kind,
+                                type_name=self._connector_type_name(connector),
+                            )
+                            for connector in element.connectors
+                        ],
                     )
                 )
 
-        return summaries
+        return node
+
+    def _flatten_components(self, node: StructureNode) -> list[ComponentSummary]:
+        components: list[ComponentSummary] = []
+        for child in node.children:
+            if child.node_kind == "component":
+                components.append(
+                    ComponentSummary(
+                        name=child.name,
+                        source=child.source,
+                        component_type=child.component_type,
+                        implementation=child.implementation,
+                        connector_count=len(child.connectors),
+                    )
+                )
+            components.extend(self._flatten_components(child))
+        return components
+
+    def _flatten_connectors(self, node: StructureNode) -> list[ConnectorSummary]:
+        connectors = list(node.connectors)
+        for child in node.children:
+            connectors.extend(self._flatten_connectors(child))
+        return connectors
+
+    def _flatten_connections(self, node: StructureNode) -> list[ConnectionSummary]:
+        connections = list(node.connections)
+        for child in node.children:
+            connections.extend(self._flatten_connections(child))
+        return connections
 
     @staticmethod
     def _resource_kind(resource_name: str) -> str:

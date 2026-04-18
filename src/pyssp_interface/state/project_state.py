@@ -38,6 +38,7 @@ class ComponentSummary:
 
 @dataclass(slots=True)
 class ConnectorSummary:
+    owner_path: str
     owner_name: str
     owner_kind: str
     name: str
@@ -47,6 +48,7 @@ class ConnectorSummary:
 
 @dataclass(slots=True)
 class ConnectionSummary:
+    owner_path: str
     start_element: str | None
     start_connector: str
     end_element: str | None
@@ -54,10 +56,24 @@ class ConnectionSummary:
 
 
 @dataclass(slots=True)
+class StructureNode:
+    path: str
+    node_kind: str
+    name: str
+    source: str | None = None
+    component_type: str | None = None
+    implementation: str | None = None
+    connectors: list[ConnectorSummary] = field(default_factory=list)
+    connections: list[ConnectionSummary] = field(default_factory=list)
+    children: list["StructureNode"] = field(default_factory=list)
+
+
+@dataclass(slots=True)
 class ProjectSnapshot:
     project_path: Path
     project_name: str
     system_name: str | None = None
+    structure_tree: StructureNode | None = None
     resources: list[ResourceSummary] = field(default_factory=list)
     fmus: list[FMUSummary] = field(default_factory=list)
     components: list[ComponentSummary] = field(default_factory=list)
