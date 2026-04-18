@@ -11,6 +11,7 @@ The application should:
 - create and edit SSP projects
 - inspect FMUs and expose their variables, units, and metadata
 - build SSP system structures around imported FMUs
+- provide a block diagram editing view for arranging components and editing connections visually
 - manage resources such as `.fmu`, `.ssv`, `.ssm`, `.ssb`, and related files
 - edit table resources such as `.ssv`, `.ssm`
 - validate and save archives through `pyssp_standard`
@@ -47,6 +48,7 @@ The first useful product should focus on authoring and inspection, not on full s
 - add components to the top-level system from imported FMUs
 - create, edit, and delete connectors and connections
 - manage parameter bindings at a basic level
+- provide an initial block diagram editing view for component placement, selection, and connection editing
 - save changes back to an SSP archive
 - run structural validation and present errors in the UI
 
@@ -69,14 +71,15 @@ Reasoning:
 - supports tree views, tables, dialogs, dockable layouts, and custom graphics scenes
 - easier to structure for long-lived desktop workflows than a web UI inside this repository
 
-Avoid starting with a node-graph-heavy canvas. The first version should use conventional desktop patterns:
+Avoid making the whole product depend on a sophisticated node editor up front. The first version should use conventional desktop patterns plus a focused diagram editor:
 
 - project tree
 - inspector/details pane
 - tabbed editors
 - tables/forms for connectors, connections, and parameters
+- a block diagram canvas for visual editing of components and connections
 
-A graphical connection canvas can be added later after the object model and editing flows are stable.
+The diagram editor should be added after the object model and service layer are stable enough to support it cleanly, but it is part of the intended product rather than an optional extra.
 
 ## Proposed Architecture
 
@@ -119,6 +122,7 @@ Initial views:
 - project/resource tree
 - FMU inspector
 - system structure editor
+- block diagram editor
 - connection editor
 - validation/errors panel
 
@@ -190,13 +194,22 @@ Implement the project through a small number of stable workstreams.
 - create/edit/delete connections
 - support simple parameter bindings
 
-### Workstream 4: Validation and Diagnostics
+### Workstream 4: Block Diagram Editing
+
+- provide a canvas-based view of the current SSP system structure
+- render components, system connectors, and directed connections
+- support selection and synchronized inspection with the details pane
+- support create/move/delete actions for components and connections
+- keep the visual editor backed by the same domain operations as the form/table editors
+- store layout metadata in annotations or a project-local representation until a stable persistence format is chosen
+
+### Workstream 5: Validation and Diagnostics
 
 - surface schema/compliance errors
 - detect invalid connection patterns before save where possible
 - show user-facing messages with references to the affected object
 
-### Workstream 5: Extended Asset Editing
+### Workstream 6: Extended Asset Editing
 
 After the MVP:
 
@@ -205,7 +218,7 @@ After the MVP:
 - SSB browser/editor
 - SRMD workflow support
 
-### Workstream 6: FMU Authoring Helpers
+### Workstream 7: FMU Authoring Helpers
 
 After the MVP:
 
@@ -264,7 +277,23 @@ Exit criteria:
 
 - user can create a small SSP around one or more FMUs and save it successfully
 
-### Phase 3: Parameter and Resource Workflows
+### Phase 3: Visual Editing
+
+Goal: add a usable block diagram editor on top of the stable authoring model.
+
+Deliverables:
+
+- block diagram canvas for components and system connectors
+- visual creation and deletion of connections
+- selection sync between diagram, tree, and inspector
+- basic component placement and movement
+- persistence for diagram layout data
+
+Exit criteria:
+
+- user can build and adjust a small system visually without dropping back to raw structural forms for every edit
+
+### Phase 4: Parameter and Resource Workflows
 
 Goal: round out the minimum engineering workflow.
 
@@ -279,7 +308,7 @@ Exit criteria:
 
 - user can manage an SSP project without manual archive surgery
 
-### Phase 4: Guided Generation and Polishing
+### Phase 5: Guided Generation and Polishing
 
 Goal: improve usability and add leverage.
 
@@ -315,6 +344,24 @@ This slice is valuable because it exercises the hardest integration boundary ear
 - mapping domain objects into UI models
 
 without forcing immediate decisions about full editing UX.
+
+## Block Diagram View Notes
+
+The block diagram editor should be treated as a first-class editing surface, not just a visualization.
+
+Recommended implementation approach:
+
+- start with `QGraphicsScene` and `QGraphicsView`
+- represent SSP components as movable block items
+- represent system connectors and FMU connectors as ports on those blocks
+- represent `Connection` objects as directed edges
+- keep editing commands routed through the same service/state layer used by non-visual editors
+
+Recommended constraints for the first version:
+
+- support manual placement before introducing auto-layout
+- prefer stable, inspectable data flow over polished graphics
+- keep a table/form editor available alongside the canvas for precise editing and debugging
 
 ## Testing Strategy
 

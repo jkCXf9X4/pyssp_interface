@@ -37,6 +37,15 @@ class ComponentSummary:
 
 
 @dataclass(slots=True)
+class ConnectorSummary:
+    owner_name: str
+    owner_kind: str
+    name: str
+    kind: str
+    type_name: str | None = None
+
+
+@dataclass(slots=True)
 class ConnectionSummary:
     start_element: str | None
     start_connector: str
@@ -48,10 +57,11 @@ class ConnectionSummary:
 class ProjectSnapshot:
     project_path: Path
     project_name: str
+    system_name: str | None = None
     resources: list[ResourceSummary] = field(default_factory=list)
     fmus: list[FMUSummary] = field(default_factory=list)
     components: list[ComponentSummary] = field(default_factory=list)
+    connectors: list[ConnectorSummary] = field(default_factory=list)
     connections: list[ConnectionSummary] = field(default_factory=list)
     validation_messages: list[str] = field(default_factory=list)
     dirty: bool = False
-

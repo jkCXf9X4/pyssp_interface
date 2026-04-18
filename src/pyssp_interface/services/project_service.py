@@ -5,6 +5,7 @@ from pathlib import Path
 from pyssp_interface._vendor import ensure_vendor_paths
 from pyssp_interface.state.project_state import (
     ComponentSummary,
+    ConnectorSummary,
     ConnectionSummary,
     FMUSummary,
     ProjectSnapshot,
@@ -42,8 +43,10 @@ class SSPProjectService:
         resources: list[ResourceSummary] = []
         fmus: list[FMUSummary] = []
         components: list[ComponentSummary] = []
+        connectors: list[ConnectorSummary] = []
         connections: list[ConnectionSummary] = []
         validation_messages: list[str] = []
+        system_name: str | None = None
 
         with SSP(project_path, mode="r") as ssp:
             ssd = ssp.system_structure
@@ -54,6 +57,8 @@ class SSPProjectService:
             fmus = self._load_fmus(ssp)
 
             if ssd.system is not None:
+                system_name = ssd.system.name
+                connectors = self._summarize_connectors(ssd)
                 components = [
                     ComponentSummary(
                         name=element.name,
@@ -82,9 +87,11 @@ class SSPProjectService:
         return ProjectSnapshot(
             project_path=project_path,
             project_name=project_path.name,
+            system_name=system_name,
             resources=resources,
             fmus=fmus,
             components=components,
+            connectors=connectors,
             connections=connections,
             validation_messages=validation_messages,
         )
@@ -162,6 +169,43 @@ class SSPProjectService:
             return [f"SSD compliance check failed: {exc}"]
         return []
 
+    def _summarize_connectors(self, ssd: SSD) -> list[ConnectorSummary]:
+        if ssd.system is None:
+            return []
+
+        summaries: list[ConnectorSummary] = []
+        system_name = ssd.system.name or "<system>"
+
+        for connector in ssd.system.connectors:
+            summaries.append(
+                ConnectorSummary(
+                    owner_name=system_name,
+                    owner_kind="system",
+                    name=connector.name,
+                    kind=connector.kind,
+                    type_name=self._connector_type_name(connector),
+                )
+            )
+
+        for element in ssd.system.elements:
+            if not hasattr(element, "connectors"):
+                continue
+
+            owner_name = getattr(element, "name", "<unnamed>")
+            owner_kind = "component" if hasattr(element, "component_type") else "system"
+            for connector in element.connectors:
+                summaries.append(
+                    ConnectorSummary(
+                        owner_name=owner_name,
+                        owner_kind=owner_kind,
+                        name=connector.name,
+                        kind=connector.kind,
+                        type_name=self._connector_type_name(connector),
+                    )
+                )
+
+        return summaries
+
     @staticmethod
     def _resource_kind(resource_name: str) -> str:
         suffix = Path(resource_name).suffix.lower()
@@ -169,3 +213,9 @@ class SSPProjectService:
             return suffix.removeprefix(".")
         return "file"
 
+    @staticmethod
+    def _connector_type_name(connector) -> str | None:
+        type_obj = getattr(connector, "type_", None)
+        if type_obj is None:
+            return None
+        return type(type_obj).__name__
