@@ -1,0 +1,6 @@
+[submodule "3rd_party/pyfmu_csv"]
+	path = 3rd_party/pyfmu_csv
+	url = git@github.com:pyssporg/pyfmu_csv.git
+[submodule "3rd_party/pyssp_standard"]
+	path = 3rd_party/pyssp_standard
+	url = git@github.com:pyssporg/pyssp_standard.git
