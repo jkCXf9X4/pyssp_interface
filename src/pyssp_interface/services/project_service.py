@@ -32,6 +32,7 @@ from pyssp_standard.ssm import SSM
 from pyssp_standard.ssd import Component, Connection, Connector, SSD, System
 from pyssp_standard.ssp import SSP
 from pyssp_standard.ssv import SSV
+from pyssp_standard.transformation_types import Transformation
 from lxml import etree as ET
 from lxml.etree import QName
 
@@ -463,6 +464,76 @@ class SSPProjectService:
 
         return self.open_project(project_path)
 
+    def update_component(
+        self,
+        project_path: Path | str,
+        *,
+        element_path: str,
+        new_name: str,
+        source: str | None,
+        component_type: str | None,
+        implementation: str | None,
+    ) -> ProjectSnapshot:
+        project_path = Path(project_path)
+        system_path = self._parent_path(element_path)
+        if system_path is None:
+            raise ValueError(f"Cannot update root element: {element_path}")
+
+        normalized_name = new_name.strip()
+        normalized_source = source.strip() if source is not None else ""
+        normalized_component_type = component_type.strip() if component_type is not None else ""
+        normalized_implementation = implementation.strip() if implementation is not None else ""
+        if not normalized_name:
+            raise ValueError("Element name is required")
+
+        element_name = element_path.rsplit("/", 1)[-1]
+
+        with SSP(project_path, mode="a") as ssp:
+            with ssp.system_structure as ssd:
+                if ssd.system is None:
+                    raise ValueError("Project has no system structure")
+
+                _, target_system = self._resolve_system_path_and_object(ssd, system_path)
+                element = next(
+                    (
+                        item
+                        for item in target_system.elements
+                        if getattr(item, "name", None) == element_name
+                    ),
+                    None,
+                )
+                if element is None:
+                    raise ValueError(f"Element does not exist: {element_path}")
+                if not isinstance(element, Component):
+                    raise ValueError(f"Element is not a component: {element_path}")
+                if any(
+                    getattr(item, "name", None) == normalized_name
+                    for item in target_system.elements
+                    if getattr(item, "name", None) != element_name
+                ):
+                    raise ValueError(f"Element already exists: {normalized_name}")
+
+                element.name = normalized_name
+                element.source = normalized_source or None
+                element.component_type = normalized_component_type or None
+                element.implementation = normalized_implementation or None
+
+                if normalized_name != element_name:
+                    for connection in target_system.connections:
+                        if connection.start_element == element_name:
+                            connection.start_element = normalized_name
+                        if connection.end_element == element_name:
+                            connection.end_element = normalized_name
+
+                    layouts = self._read_system_layout_annotation(target_system)
+                    old_layout_path = element_path
+                    new_layout_path = f"{system_path}/{normalized_name}"
+                    if old_layout_path in layouts:
+                        layouts[new_layout_path] = layouts.pop(old_layout_path)
+                        self._write_system_layout_annotation(target_system, layouts)
+
+        return self.open_project(project_path)
+
     def update_connection(
         self,
         project_path: Path | str,
@@ -618,6 +689,7 @@ class SSPProjectService:
                 if any(parameter["name"] == normalized_name for parameter in ssv.parameters):
                     raise ValueError(f"SSV parameter already exists: {normalized_name}")
                 ssv.add_parameter(normalized_name, type_name, value=value)
+            ssp.mark_changed()
 
         return self.list_ssv_parameters(project_path, resource_name=resource_name)
 
@@ -647,6 +719,7 @@ class SSPProjectService:
                 parameter["name"] = normalized_name
                 parameter["type_name"] = type_name
                 parameter["type_value"] = ParameterType(type_name, {"value": value})
+            ssp.mark_changed()
 
         return self.list_ssv_parameters(project_path, resource_name=resource_name)
 
@@ -666,6 +739,7 @@ class SSPProjectService:
                 if len(parameters) == len(ssv.parameters):
                     raise ValueError(f"SSV parameter does not exist: {name}")
                 ssv.parameters = parameters
+            ssp.mark_changed()
 
         return self.list_ssv_parameters(project_path, resource_name=resource_name)
 
@@ -716,6 +790,7 @@ class SSPProjectService:
                 ):
                     raise ValueError("SSM mapping already exists")
                 ssm.add_mapping(normalized_source, normalized_target)
+            ssp.mark_changed()
 
         return self.list_ssm_mappings(project_path, resource_name=resource_name)
 
@@ -728,6 +803,7 @@ class SSPProjectService:
         target: str,
         new_source: str,
         new_target: str,
+        transformation_type: str | None = None,
     ) -> list[SSMMappingSummary]:
         project_path = Path(project_path)
         normalized_source = new_source.strip()
@@ -756,6 +832,8 @@ class SSPProjectService:
                     raise ValueError("SSM mapping already exists")
                 mapping["source"] = normalized_source
                 mapping["target"] = normalized_target
+                mapping["transformation"] = self._make_transformation(transformation_type)
+            ssp.mark_changed()
 
         return self.list_ssm_mappings(project_path, resource_name=resource_name)
 
@@ -780,6 +858,7 @@ class SSPProjectService:
                 if len(mappings) == len(ssm.mappings):
                     raise ValueError("SSM mapping does not exist")
                 ssm.mappings[:] = mappings
+            ssp.mark_changed()
 
         return self.list_ssm_mappings(project_path, resource_name=resource_name)
 
@@ -1231,6 +1310,22 @@ class SSPProjectService:
         if type_obj is None:
             return None
         return type(type_obj).__name__
+
+    @staticmethod
+    def _make_transformation(transformation_type: str | None) -> Transformation:
+        normalized = (transformation_type or "").strip()
+        if not normalized:
+            return Transformation()
+
+        attributes_by_type = {
+            "LinearTransformation": {"factor": "1.0", "offset": "0.0"},
+            "BooleanMappingTransformation": {"source": "false", "target": "false"},
+            "IntegerMappingTransformation": {"source": "0", "target": "0"},
+            "EnumerationMappingTransformation": {"source": "", "target": ""},
+        }
+        if normalized not in attributes_by_type:
+            raise ValueError(f"Unsupported transformation type: {transformation_type}")
+        return Transformation(normalized, attributes_by_type[normalized])
 
     @staticmethod
     def _make_type(type_name: str):

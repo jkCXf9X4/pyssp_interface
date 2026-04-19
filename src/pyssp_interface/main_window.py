@@ -2,8 +2,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QSignalBlocker, Qt
 from PySide6.QtWidgets import (
+    QAbstractItemView,
     QFileDialog,
     QInputDialog,
     QListWidget,
@@ -51,6 +52,7 @@ class MainWindow(QMainWindow):
         self._connector_table_payloads: list[dict] = []
         self._connection_table_payloads: list[dict] = []
         self._resource_table_context: dict | None = None
+        self._is_populating_tables = False
 
         self.setWindowTitle("pyssp_interface")
         self.resize(1280, 780)
@@ -73,22 +75,22 @@ class MainWindow(QMainWindow):
         )
         self.resource_table = self._create_table(["Name", "Type", "Value"])
         self.resource_table.itemSelectionChanged.connect(self._handle_resource_table_selection)
-        self.resource_table.itemDoubleClicked.connect(lambda *_: self._edit_selected_resource_row())
+        self.resource_table.itemChanged.connect(self._handle_resource_table_edit)
         self.component_table = self._create_table(
             ["Name", "Source", "Type", "Implementation", "Connectors"]
         )
         self.component_table.itemSelectionChanged.connect(self._handle_component_table_selection)
-        self.component_table.itemDoubleClicked.connect(lambda *_: self._edit_selected_component())
+        self.component_table.itemChanged.connect(self._handle_component_table_edit)
         self.connector_table = self._create_table(
             ["Owner", "Owner Kind", "Name", "Kind", "Type"]
         )
         self.connector_table.itemSelectionChanged.connect(self._handle_connector_table_selection)
-        self.connector_table.itemDoubleClicked.connect(lambda *_: self._edit_selected_connector())
+        self.connector_table.itemChanged.connect(self._handle_connector_table_edit)
         self.connection_table = self._create_table(
             ["Source Element", "Source Connector", "Target Element", "Target Connector"]
         )
         self.connection_table.itemSelectionChanged.connect(self._handle_connection_table_selection)
-        self.connection_table.itemDoubleClicked.connect(lambda *_: self._edit_selected_connection())
+        self.connection_table.itemChanged.connect(self._handle_connection_table_edit)
 
         self.structure_tabs = QTabWidget()
         self.structure_tabs.addTab(self.component_table, "Components")
@@ -444,27 +446,59 @@ class MainWindow(QMainWindow):
         if node is None:
             return
 
-        name, ok = QInputDialog.getText(
+        name, ok = QInputDialog.getText(self, "Edit Component", "Component name:", text=node.name)
+        if not ok or not name.strip():
+            return
+        source, ok = QInputDialog.getText(
             self,
             "Edit Component",
-            "Component name:",
-            text=node.name,
+            "Component source:",
+            text=node.source or "",
         )
-        if not ok or not name.strip() or name.strip() == node.name:
+        if not ok:
+            return
+        component_type, ok = QInputDialog.getText(
+            self,
+            "Edit Component",
+            "Component type:",
+            text=node.component_type or "",
+        )
+        if not ok:
+            return
+        implementation, ok = QInputDialog.getText(
+            self,
+            "Edit Component",
+            "Implementation:",
+            text=node.implementation or "",
+        )
+        if not ok:
+            return
+        if (
+            name.strip() == node.name
+            and (source.strip() or None) == node.source
+            and (component_type.strip() or None) == node.component_type
+            and (implementation.strip() or None) == node.implementation
+        ):
             return
 
         try:
-            snapshot = self.project_service.rename_element(
+            snapshot = self.project_service.update_component(
                 self.project.project_path,
                 element_path=element_path,
                 new_name=name,
+                source=source,
+                component_type=component_type,
+                implementation=implementation,
             )
         except Exception as exc:
             QMessageBox.critical(self, "Edit component failed", str(exc))
             return
 
         self._load_snapshot(snapshot)
-        self.statusBar().showMessage(f"Renamed component to {name.strip()}")
+        self._set_tree_selection_by_path(self._updated_child_path(element_path, name.strip()))
+        self.explorer_tabs.setCurrentWidget(self.structure_tabs)
+        self.structure_tabs.setCurrentWidget(self.component_table)
+        self.statusBar().showMessage(f"Updated component {name.strip()}")
 
     def _edit_selected_connection(self) -> None:
         if self.project is None:
@@ -808,6 +842,14 @@ class MainWindow(QMainWindow):
         )
         if not ok or not target.strip():
             return
+        transformation_type, ok = QInputDialog.getText(
+            self,
+            "Edit SSM Mapping",
+            "Transformation:",
+            text=payload.get("transformation_type") or "",
+        )
+        if not ok:
+            return
         try:
             rows = self.project_service.update_ssm_mapping(
                 self.project.project_path,
@@ -816,6 +858,7 @@ class MainWindow(QMainWindow):
                 target=payload["target"],
                 new_source=source,
                 new_target=target,
+                transformation_type=transformation_type.strip() or None,
             )
         except Exception as exc:
             QMessageBox.critical(self, "Edit SSM mapping failed", str(exc))
@@ -862,6 +905,221 @@ class MainWindow(QMainWindow):
 
         self._show_ssm_resource(resource_name, rows)
         self.statusBar().showMessage("Removed SSM mapping")
+
+    def _handle_component_table_edit(self, item: QTableWidgetItem) -> None:
+        if self._is_populating_tables or self.project is None:
+            return
+
+        payload = self._component_table_payload_at_row(item.row())
+        if payload is None:
+            return
+        node = self._find_structure_node(payload.get("path"))
+        if node is None:
+            return
+
+        new_name = self._table_text(self.component_table, item.row(), 0)
+        source = self._optional_table_text(self.component_table, item.row(), 1)
+        component_type = self._optional_table_text(self.component_table, item.row(), 2)
+        implementation = self._optional_table_text(self.component_table, item.row(), 3)
+        if (
+            new_name == node.name
+            and source == node.source
+            and component_type == node.component_type
+            and implementation == node.implementation
+        ):
+            return
+
+        try:
+            snapshot = self.project_service.update_component(
+                self.project.project_path,
+                element_path=payload["path"],
+                new_name=new_name,
+                source=source,
+                component_type=component_type,
+                implementation=implementation,
+            )
+        except Exception as exc:
+            QMessageBox.critical(self, "Edit component failed", str(exc))
+            self._update_details()
+            return
+
+        new_path = self._updated_child_path(payload["path"], new_name)
+        self._load_snapshot(snapshot)
+        self._set_tree_selection_by_path(new_path)
+        self.explorer_tabs.setCurrentWidget(self.structure_tabs)
+        self.structure_tabs.setCurrentWidget(self.component_table)
+        self._select_component_row(new_path)
+        self.statusBar().showMessage(f"Updated component {new_name}")
+
+    def _handle_connector_table_edit(self, item: QTableWidgetItem) -> None:
+        if self._is_populating_tables or self.project is None:
+            return
+
+        payload = self._selected_connector_payload_for_row(item.row())
+        if payload is None:
+            return
+        connector = self._find_connector(payload.get("owner_path"), payload.get("name"))
+        if connector is None or connector.owner_kind != "system":
+            self._update_details()
+            return
+
+        new_name = self._table_text(self.connector_table, item.row(), 2)
+        kind = self._table_text(self.connector_table, item.row(), 3)
+        type_name = self._table_text(self.connector_table, item.row(), 4)
+        display_type = self._display_connector_type(connector.type_name)
+        if new_name == connector.name and kind == connector.kind and type_name == display_type:
+            return
+
+        try:
+            snapshot = self.project_service.update_system_connector(
+                self.project.project_path,
+                system_path=connector.owner_path,
+                name=connector.name,
+                new_name=new_name,
+                kind=kind,
+                type_name=type_name,
+            )
+        except Exception as exc:
+            QMessageBox.critical(self, "Edit connector failed", str(exc))
+            self._update_details()
+            return
+
+        self._load_snapshot(snapshot)
+        self._set_tree_selection_by_path(connector.owner_path)
+        self.explorer_tabs.setCurrentWidget(self.structure_tabs)
+        self.structure_tabs.setCurrentWidget(self.connector_table)
+        self._select_connector_row(connector.owner_path, new_name)
+        self.statusBar().showMessage(f"Updated connector {new_name}")
+
+    def _handle_connection_table_edit(self, item: QTableWidgetItem) -> None:
+        if self._is_populating_tables or self.project is None:
+            return
+
+        payload = self._connection_table_payload_at_row(item.row())
+        if payload is None:
+            return
+        connection = self._find_connection(payload.get("owner_path"), payload.get("key"))
+        if connection is None:
+            return
+
+        start_element = self._table_connection_element(item.row(), 0)
+        start_connector = self._table_text(self.connection_table, item.row(), 1)
+        end_element = self._table_connection_element(item.row(), 2)
+        end_connector = self._table_text(self.connection_table, item.row(), 3)
+        if (
+            start_element == connection.start_element
+            and start_connector == connection.start_connector
+            and end_element == connection.end_element
+            and end_connector == connection.end_connector
+        ):
+            return
+
+        try:
+            snapshot = self.project_service.update_connection(
+                self.project.project_path,
+                system_path=connection.owner_path,
+                old_start_owner_path=self._connection_endpoint_owner_path(
+                    connection.owner_path,
+                    connection.start_element,
+                ),
+                old_start_element=None,
+                old_start_connector=connection.start_connector,
+                old_end_owner_path=self._connection_endpoint_owner_path(
+                    connection.owner_path,
+                    connection.end_element,
+                ),
+                old_end_element=None,
+                old_end_connector=connection.end_connector,
+                new_start_owner_path=self._connection_endpoint_owner_path(
+                    connection.owner_path,
+                    start_element,
+                ),
+                new_start_element=None,
+                new_start_connector=start_connector,
+                new_end_owner_path=self._connection_endpoint_owner_path(
+                    connection.owner_path,
+                    end_element,
+                ),
+                new_end_element=None,
+                new_end_connector=end_connector,
+            )
+        except Exception as exc:
+            QMessageBox.critical(self, "Edit connection failed", str(exc))
+            self._update_details()
+            return
+
+        new_key = (start_element, start_connector, end_element, end_connector)
+        self._load_snapshot(snapshot)
+        self._set_tree_selection_by_path(connection.owner_path)
+        self.explorer_tabs.setCurrentWidget(self.structure_tabs)
+        self.structure_tabs.setCurrentWidget(self.connection_table)
+        self._select_connection_row(connection.owner_path, new_key)
+        self.statusBar().showMessage("Updated connection")
+
+    def _handle_resource_table_edit(self, item: QTableWidgetItem) -> None:
+        if self._is_populating_tables or self.project is None:
+            return
+
+        context = self._resource_editor_context()
+        payload = self._resource_row_payload_at_row(item.row())
+        if context is None or payload is None:
+            return
+
+        resource_name = context["resource_name"]
+        if context["kind"] == "ssv":
+            new_name = self._table_text(self.resource_table, item.row(), 0)
+            type_name = self._table_text(self.resource_table, item.row(), 1)
+            value = self._table_text(self.resource_table, item.row(), 2)
+            if (
+                new_name == payload["name"]
+                and type_name == payload["type_name"]
+                and value == (payload.get("value") or "")
+            ):
+                return
+            try:
+                rows = self.project_service.update_ssv_parameter(
+                    self.project.project_path,
+                    resource_name=resource_name,
+                    name=payload["name"],
+                    new_name=new_name,
+                    type_name=type_name,
+                    value=value,
+                )
+            except Exception as exc:
+                QMessageBox.critical(self, "Edit SSV parameter failed", str(exc))
+                self._restore_resource_table(resource_name, "ssv")
+                return
+            self._show_ssv_resource(resource_name, rows)
+            self._select_ssv_row(new_name)
+            self.statusBar().showMessage(f"Updated SSV parameter {new_name}")
+            return
+
+        new_source = self._table_text(self.resource_table, item.row(), 0)
+        new_target = self._table_text(self.resource_table, item.row(), 1)
+        transformation_type = self._optional_table_text(self.resource_table, item.row(), 2)
+        if (
+            new_source == payload["source"]
+            and new_target == payload["target"]
+            and transformation_type == payload.get("transformation_type")
+        ):
+            return
+        try:
+            rows = self.project_service.update_ssm_mapping(
+                self.project.project_path,
+                resource_name=resource_name,
+                source=payload["source"],
+                target=payload["target"],
+                new_source=new_source,
+                new_target=new_target,
+                transformation_type=transformation_type,
+            )
+        except Exception as exc:
+            QMessageBox.critical(self, "Edit SSM mapping failed", str(exc))
+            self._restore_resource_table(resource_name, "ssm")
+            return
+        self._show_ssm_resource(resource_name, rows)
+        self._select_ssm_row(new_source, new_target)
+        self.statusBar().showMessage("Updated SSM mapping")
 
     def _load_snapshot(self, snapshot: ProjectSnapshot) -> None:
         self.project = snapshot
@@ -912,12 +1170,9 @@ class MainWindow(QMainWindow):
         self._component_table_payloads = self._component_payloads()
         self._connector_table_payloads = self._connector_payloads()
         self._connection_table_payloads = self._connection_payloads()
-        self._set_table_rows(self.component_table, [self._component_row(component) for component in components])
-        self._set_table_rows(self.connector_table, [self._connector_row(connector) for connector in connectors])
-        self._set_table_rows(
-            self.connection_table,
-            [self._connection_row(connection) for connection in connections],
-        )
+        self._populate_component_table(components)
+        self._populate_connector_table(connectors)
+        self._populate_connection_table(connections)
 
     def _handle_resource_table_selection(self) -> None:
         context = self._resource_editor_context()
@@ -1096,11 +1351,8 @@ class MainWindow(QMainWindow):
                 for connector in node.connectors
             ]
             self.details_panel.setPlainText(format_component_summary(component))
-            self._set_table_rows(self.component_table, [self._component_row(component)])
-            self._set_table_rows(
-                self.connector_table,
-                [self._connector_row(connector) for connector in node.connectors],
-            )
+            self._populate_component_table([component])
+            self._populate_connector_table(node.connectors)
             parent_system = self._find_parent_system(node.path)
             self._render_diagram(parent_system, highlight_path=node.path)
             self.explorer_tabs.setCurrentWidget(self.structure_tabs)
@@ -1128,14 +1380,8 @@ class MainWindow(QMainWindow):
                 for connection in node.connections
             ]
             self.details_panel.setPlainText(format_system_summary(node))
-            self._set_table_rows(
-                self.connector_table,
-                [self._connector_row(connector) for connector in node.connectors],
-            )
-            self._set_table_rows(
-                self.connection_table,
-                [self._connection_row(connection) for connection in node.connections],
-            )
+            self._populate_connector_table(node.connectors)
+            self._populate_connection_table(node.connections)
             self._render_diagram(node, highlight_path=node.path)
             self.explorer_tabs.setCurrentWidget(self.structure_tabs)
             self.structure_tabs.setCurrentWidget(self.connector_table)
@@ -1152,10 +1398,7 @@ class MainWindow(QMainWindow):
             self.details_panel.setPlainText(
                 f"{len(connectors)} connectors in {payload.get('owner_name', '-')}"
             )
-            self._set_table_rows(
-                self.connector_table,
-                [self._connector_row(connector) for connector in connectors],
-            )
+            self._populate_connector_table(connectors)
             self._render_diagram(self._diagram_scope_for_path(owner_path), highlight_path=owner_path)
             self.explorer_tabs.setCurrentWidget(self.structure_tabs)
             self.structure_tabs.setCurrentWidget(self.connector_table)
@@ -1169,7 +1412,7 @@ class MainWindow(QMainWindow):
                 {"owner_path": connector.owner_path, "name": connector.name}
             ]
             self.details_panel.setPlainText(format_connector_summary(connector))
-            self._set_table_rows(self.connector_table, [self._connector_row(connector)])
+            self._populate_connector_table([connector])
             self._render_diagram(
                 self._diagram_scope_for_path(payload.get("owner_path")),
                 highlight_path=payload.get("owner_path"),
@@ -1197,10 +1440,7 @@ class MainWindow(QMainWindow):
             self.details_panel.setPlainText(
                 f"{len(connections)} connections in {payload.get('owner_name', '-')}"
             )
-            self._set_table_rows(
-                self.connection_table,
-                [self._connection_row(connection) for connection in connections],
-            )
+            self._populate_connection_table(connections)
             self._render_diagram(self._diagram_scope_for_path(owner_path), highlight_path=owner_path)
             self.explorer_tabs.setCurrentWidget(self.structure_tabs)
             self.structure_tabs.setCurrentWidget(self.connection_table)
@@ -1214,7 +1454,7 @@ class MainWindow(QMainWindow):
                 {"owner_path": connection.owner_path, "key": payload.get("key")}
             ]
             self.details_panel.setPlainText(format_connection_summary(connection))
-            self._set_table_rows(self.connection_table, [self._connection_row(connection)])
+            self._populate_connection_table([connection])
             self._render_diagram(
                 self._find_structure_node(payload.get("owner_path")),
                 highlight_path=payload.get("owner_path"),
@@ -1395,7 +1635,7 @@ class MainWindow(QMainWindow):
         self.diagram_view.set_selected_endpoint(None)
         self.diagram_view.set_selected_connection(self.diagram_controller.selected_connection)
         self.details_panel.setPlainText(format_connection_summary(connection))
-        self._set_table_rows(self.connection_table, [self._connection_row(connection)])
+        self._populate_connection_table([connection])
         self.explorer_tabs.setCurrentWidget(self.diagram_view)
         if message is not None:
             self.statusBar().showMessage(message)
@@ -1472,6 +1712,85 @@ class MainWindow(QMainWindow):
             return owner_system_path
         return f"{owner_system_path}/{local_element}"
 
+    def _set_tree_selection_by_path(self, path: str | None) -> None:
+        if not path:
+            return
+        item = self.project_tree.find_item_by_path(path)
+        if item is None:
+            return
+        self.project_tree.setCurrentItem(item)
+
+    def _select_component_row(self, path: str) -> None:
+        for row, payload in enumerate(self._component_table_payloads):
+            if payload.get("path") == path:
+                self.component_table.selectRow(row)
+                return
+
+    def _select_connector_row(self, owner_path: str, name: str) -> None:
+        for row, payload in enumerate(self._connector_table_payloads):
+            if payload.get("owner_path") == owner_path and payload.get("name") == name:
+                self.connector_table.selectRow(row)
+                return
+
+    def _select_connection_row(
+        self,
+        owner_path: str,
+        key: tuple[str | None, str, str | None, str],
+    ) -> None:
+        for row, payload in enumerate(self._connection_table_payloads):
+            if payload.get("owner_path") == owner_path and payload.get("key") == key:
+                self.connection_table.selectRow(row)
+                return
+
+    def _select_ssv_row(self, name: str) -> None:
+        context = self._resource_table_context or {}
+        for row, payload in enumerate(context.get("rows", [])):
+            if payload.get("name") == name:
+                self.resource_table.selectRow(row)
+                return
+
+    def _select_ssm_row(self, source: str, target: str) -> None:
+        context = self._resource_table_context or {}
+        for row, payload in enumerate(context.get("rows", [])):
+            if payload.get("source") == source and payload.get("target") == target:
+                self.resource_table.selectRow(row)
+                return
+
+    def _restore_resource_table(self, resource_name: str, kind: str) -> None:
+        if kind == "ssv":
+            self._show_ssv_resource(resource_name)
+            return
+        self._show_ssm_resource(resource_name)
+
+    @staticmethod
+    def _updated_child_path(path: str, new_name: str) -> str:
+        parent = MainWindow._parent_path(path)
+        if parent is None:
+            return new_name
+        return f"{parent}/{new_name}"
+
+    @staticmethod
+    def _table_text(table: QTableWidget, row: int, column: int) -> str:
+        item = table.item(row, column)
+        return item.text().strip() if item is not None else ""
+
+    @staticmethod
+    def _optional_table_text(table: QTableWidget, row: int, column: int) -> str | None:
+        value = MainWindow._table_text(table, row, column)
+        return value or None
+
+    def _table_connection_element(self, row: int, column: int) -> str | None:
+        value = self._table_text(self.connection_table, row, column)
+        if not value or value == "<system>":
+            return None
+        return value
+
+    @staticmethod
+    def _display_connector_type(type_name: str | None) -> str:
+        if not type_name:
+            return ""
+        return type_name.removeprefix("Type")
+
     def _create_connection_from_endpoints(
         self,
         *,
@@ -1521,12 +1840,7 @@ class MainWindow(QMainWindow):
         return self._find_connector(payload.get("owner_path"), payload.get("name"))
 
     def _selected_resource_row_payload(self) -> dict | None:
-        if self._resource_table_context is None:
-            return None
-        row = self.resource_table.currentRow()
-        if row < 0 or row >= len(self._resource_table_context["rows"]):
-            return None
-        return self._resource_table_context["rows"][row]
+        return self._resource_row_payload_at_row(self.resource_table.currentRow())
 
     def _resource_editor_context(self) -> dict | None:
         payload = self.project_tree.current_payload()
@@ -1549,19 +1863,44 @@ class MainWindow(QMainWindow):
         return payload.get("path")
 
     def _selected_component_table_payload(self) -> dict | None:
-        row = self.component_table.currentRow()
+        return self._component_table_payload_at_row(self.component_table.currentRow())
+
+    def _selected_connector_table_payload(self) -> dict | None:
+        return self._connector_payload_at_row(self.connector_table.currentRow())
+
+    def _selected_connection_table_payload(self) -> dict | None:
+        return self._connection_table_payload_at_row(self.connection_table.currentRow())
+
+    def _resource_row_payload_at_row(self, row: int) -> dict | None:
+        if self._resource_table_context is None:
+            return None
+        if row < 0 or row >= len(self._resource_table_context["rows"]):
+            return None
+        return self._resource_table_context["rows"][row]
+
+    def _component_table_payload_at_row(self, row: int) -> dict | None:
         if row < 0 or row >= len(self._component_table_payloads):
             return None
         return self._component_table_payloads[row]
 
-    def _selected_connector_table_payload(self) -> dict | None:
-        row = self.connector_table.currentRow()
+    def _connector_payload_at_row(self, row: int) -> dict | None:
         if row < 0 or row >= len(self._connector_table_payloads):
             return None
         return self._connector_table_payloads[row]
 
-    def _selected_connection_table_payload(self) -> dict | None:
-        row = self.connection_table.currentRow()
+    def _selected_connector_payload_for_row(self, row: int) -> dict | None:
+        payload = self._connector_payload_at_row(row)
+        if payload is not None:
+            return payload
+        current_payload = self.project_tree.current_payload()
+        if current_payload.get("kind") != "connector":
+            return None
+        return {
+            "owner_path": current_payload.get("owner_path"),
+            "name": current_payload.get("name"),
+        }
+
+    def _connection_table_payload_at_row(self, row: int) -> dict | None:
         if row < 0 or row >= len(self._connection_table_payloads):
             return None
         return self._connection_table_payloads[row]
@@ -1635,9 +1974,9 @@ class MainWindow(QMainWindow):
             )
         )
         self._set_table_headers(self.resource_table, ["Name", "Type", "Value"])
-        self._set_table_rows(
-            self.resource_table,
+        self._populate_resource_table(
             [[row.name, row.type_name, row.value or ""] for row in rows],
+            editable_columns={0, 1, 2},
         )
         self.explorer_tabs.setCurrentWidget(self.resource_table)
 
@@ -1676,9 +2015,9 @@ class MainWindow(QMainWindow):
             )
         )
         self._set_table_headers(self.resource_table, ["Source", "Target", "Transformation"])
-        self._set_table_rows(
-            self.resource_table,
+        self._populate_resource_table(
             [[row.source, row.target, row.transformation_type or ""] for row in rows],
+            editable_columns={0, 1, 2},
         )
         self.explorer_tabs.setCurrentWidget(self.resource_table)
 
@@ -1699,7 +2038,7 @@ class MainWindow(QMainWindow):
             connector.owner_kind,
             connector.name,
             connector.kind,
-            connector.type_name or "",
+            MainWindow._display_connector_type(connector.type_name),
         ]
 
     @staticmethod
@@ -1715,7 +2054,11 @@ class MainWindow(QMainWindow):
     def _create_table(headers: list[str]) -> QTableWidget:
         table = QTableWidget(0, len(headers))
         table.setHorizontalHeaderLabels(headers)
-        table.setEditTriggers(QTableWidget.NoEditTriggers)
+        table.setEditTriggers(
+            QAbstractItemView.DoubleClicked
+            | QAbstractItemView.EditKeyPressed
+            | QAbstractItemView.SelectedClicked
+        )
         table.setSelectionBehavior(QTableWidget.SelectRows)
         table.setSelectionMode(QTableWidget.SingleSelection)
         table.setAlternatingRowColors(True)
@@ -1727,11 +2070,63 @@ class MainWindow(QMainWindow):
         table.setColumnCount(len(headers))
         table.setHorizontalHeaderLabels(headers)
 
-    @staticmethod
-    def _set_table_rows(table: QTableWidget, rows: list[list[str]]) -> None:
+    def _set_table_rows(
+        self,
+        table: QTableWidget,
+        rows: list[list[str]],
+        *,
+        editable_columns: set[int] | None = None,
+        editable_rows: set[int] | None = None,
+    ) -> None:
+        editable_columns = editable_columns or set()
+        editable_rows = editable_rows if editable_rows is not None else set(range(len(rows)))
+        self._is_populating_tables = True
+        blocker = QSignalBlocker(table)
         table.setRowCount(len(rows))
         table.clearContents()
         for row_index, row in enumerate(rows):
             for col_index, value in enumerate(row):
-                table.setItem(row_index, col_index, QTableWidgetItem(value))
+                item = QTableWidgetItem(value)
+                if col_index not in editable_columns or row_index not in editable_rows:
+                    item.setFlags(item.flags() & ~Qt.ItemIsEditable)
+                table.setItem(row_index, col_index, item)
         table.resizeColumnsToContents()
+        del blocker
+        self._is_populating_tables = False
+
+    def _populate_component_table(self, components: list[ComponentSummary]) -> None:
+        self._set_table_rows(
+            self.component_table,
+            [self._component_row(component) for component in components],
+            editable_columns={0, 1, 2, 3},
+        )
+
+    def _populate_connector_table(self, connectors: list[ConnectorSummary]) -> None:
+        editable_rows = {
+            index for index, connector in enumerate(connectors) if connector.owner_kind == "system"
+        }
+        self._set_table_rows(
+            self.connector_table,
+            [self._connector_row(connector) for connector in connectors],
+            editable_columns={2, 3, 4},
+            editable_rows=editable_rows,
+        )
+
+    def _populate_connection_table(self, connections: list[ConnectionSummary]) -> None:
+        self._set_table_rows(
+            self.connection_table,
+            [self._connection_row(connection) for connection in connections],
+            editable_columns={0, 1, 2, 3},
+        )
+
+    def _populate_resource_table(
+        self,
+        rows: list[list[str]],
+        *,
+        editable_columns: set[int],
+    ) -> None:
+        self._set_table_rows(
+            self.resource_table,
+            rows,
+            editable_columns=editable_columns,
+        )

@@ -159,6 +159,48 @@ def test_rename_element_updates_connections_and_layout(tmp_path):
     assert snapshot.diagram_layouts["system"]["system/renamed_component"] == (420.0, 260.0, 240.0, 84.0)
 
 
+def test_update_component_updates_metadata_connections_and_layout(tmp_path):
+    project_path = tmp_path / "update-component-demo.ssp"
+    service = SSPProjectService()
+    fmu_path = _extract_fmu_from_ssp(
+        DCMOTOR_SSP,
+        "resources/emachine_model.fmu",
+        tmp_path,
+    )
+
+    service.create_project(project_path)
+    service.import_fmu(project_path, fmu_path)
+    snapshot = service.add_component_from_fmu(project_path, fmu_path.name)
+    component_name = next(component.name for component in snapshot.components)
+    service.update_block_layout(
+        project_path,
+        system_path="system",
+        block_path=f"system/{component_name}",
+        x=420.0,
+        y=260.0,
+    )
+
+    snapshot = service.update_component(
+        project_path,
+        element_path=f"system/{component_name}",
+        new_name="updated_component",
+        source="resources/updated_model.fmu",
+        component_type="application/x-custom",
+        implementation="ModelExchange",
+    )
+
+    updated = next((component for component in snapshot.components if component.name == "updated_component"), None)
+    assert updated is not None
+    assert updated.source == "resources/updated_model.fmu"
+    assert updated.component_type == "application/x-custom"
+    assert updated.implementation == "ModelExchange"
+    assert all(
+        connection.start_element != component_name and connection.end_element != component_name
+        for connection in snapshot.connections
+    )
+    assert snapshot.diagram_layouts["system"]["system/updated_component"] == (420.0, 260.0, 240.0, 84.0)
+
+
 def test_add_system_connector_and_connection_round_trip(tmp_path):
     project_path = tmp_path / "connection-demo.ssp"
     service = SSPProjectService()
@@ -330,8 +372,14 @@ def test_ssm_mapping_crud_round_trip(tmp_path):
         target="b",
         new_source="c",
         new_target="d",
+        transformation_type="LinearTransformation",
     )
-    assert any(mapping.source == "c" and mapping.target == "d" for mapping in mappings)
+    assert any(
+        mapping.source == "c"
+        and mapping.target == "d"
+        and mapping.transformation_type == "LinearTransformation"
+        for mapping in mappings
+    )
 
     mappings = service.remove_ssm_mapping(
         project_path,
