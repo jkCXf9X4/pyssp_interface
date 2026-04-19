@@ -10,6 +10,8 @@ from pyssp_interface.state.project_state import (
     FMUSummary,
     ProjectSnapshot,
     ResourceSummary,
+    SSMMappingSummary,
+    SSVParameterSummary,
     StructureNode,
     VariableSummary,
 )
@@ -25,8 +27,11 @@ from pyssp_standard.common_content_ssc import (
     TypeString,
 )
 from pyssp_standard.fmu import FMU
+from pyssp_standard.parameter_types import ParameterType
+from pyssp_standard.ssm import SSM
 from pyssp_standard.ssd import Component, Connection, Connector, SSD, System
 from pyssp_standard.ssp import SSP
+from pyssp_standard.ssv import SSV
 from lxml import etree as ET
 from lxml.etree import QName
 
@@ -249,6 +254,77 @@ class SSPProjectService:
                 if connection in target_system.connections:
                     raise ValueError("Connection already exists")
                 target_system.connections.append(connection)
+
+        return self.open_project(project_path)
+
+    def update_system_connector(
+        self,
+        project_path: Path | str,
+        *,
+        system_path: str | None = None,
+        name: str,
+        new_name: str,
+        kind: str,
+        type_name: str,
+    ) -> ProjectSnapshot:
+        project_path = Path(project_path)
+        normalized_name = new_name.strip()
+        normalized_kind = kind.strip()
+        if not normalized_name:
+            raise ValueError("Connector name is required")
+
+        with SSP(project_path, mode="a") as ssp:
+            with ssp.system_structure as ssd:
+                if ssd.system is None:
+                    ssd.system = System(None, "system")
+
+                _, target_system = self._resolve_system_path_and_object(ssd, system_path)
+                connector = next((item for item in target_system.connectors if item.name == name), None)
+                if connector is None:
+                    raise ValueError(f"System connector does not exist: {name}")
+                if any(item.name == normalized_name for item in target_system.connectors if item.name != name):
+                    raise ValueError(f"System connector already exists: {normalized_name}")
+
+                connector.name = normalized_name
+                connector.kind = normalized_kind
+                connector.type_ = self._make_type(type_name)
+
+                for connection in target_system.connections:
+                    if connection.start_element is None and connection.start_connector == name:
+                        connection.start_connector = normalized_name
+                    if connection.end_element is None and connection.end_connector == name:
+                        connection.end_connector = normalized_name
+
+        return self.open_project(project_path)
+
+    def remove_system_connector(
+        self,
+        project_path: Path | str,
+        *,
+        system_path: str | None = None,
+        name: str,
+    ) -> ProjectSnapshot:
+        project_path = Path(project_path)
+
+        with SSP(project_path, mode="a") as ssp:
+            with ssp.system_structure as ssd:
+                if ssd.system is None:
+                    raise ValueError("Project has no system structure")
+
+                _, target_system = self._resolve_system_path_and_object(ssd, system_path)
+                connector = next((item for item in target_system.connectors if item.name == name), None)
+                if connector is None:
+                    raise ValueError(f"System connector does not exist: {name}")
+
+                target_system.connectors.remove(connector)
+                target_system.connections = [
+                    connection
+                    for connection in target_system.connections
+                    if not (
+                        (connection.start_element is None and connection.start_connector == name)
+                        or (connection.end_element is None and connection.end_connector == name)
+                    )
+                ]
 
         return self.open_project(project_path)
 
@@ -501,6 +577,211 @@ class SSPProjectService:
             fmi_version=model_description.fmi_version,
             variables=variables,
         )
+
+    def list_ssv_parameters(
+        self,
+        project_path: Path | str,
+        *,
+        resource_name: str,
+    ) -> list[SSVParameterSummary]:
+        project_path = Path(project_path)
+        with SSP(project_path, mode="r") as ssp:
+            resource_path = self._resource_temp_path(ssp, resource_name, suffix=".ssv")
+            with SSV(resource_path, mode="r") as ssv:
+                return [
+                    SSVParameterSummary(
+                        resource_name=resource_name,
+                        name=parameter["name"],
+                        type_name=parameter["type_name"],
+                        value=parameter["type_value"].parameter.get("value"),
+                    )
+                    for parameter in ssv.parameters
+                ]
+
+    def add_ssv_parameter(
+        self,
+        project_path: Path | str,
+        *,
+        resource_name: str,
+        name: str,
+        type_name: str,
+        value: str,
+    ) -> list[SSVParameterSummary]:
+        project_path = Path(project_path)
+        normalized_name = name.strip()
+        if not normalized_name:
+            raise ValueError("Parameter name is required")
+
+        with SSP(project_path, mode="a") as ssp:
+            resource_path = self._resource_temp_path(ssp, resource_name, suffix=".ssv")
+            with SSV(resource_path, mode="a") as ssv:
+                if any(parameter["name"] == normalized_name for parameter in ssv.parameters):
+                    raise ValueError(f"SSV parameter already exists: {normalized_name}")
+                ssv.add_parameter(normalized_name, type_name, value=value)
+
+        return self.list_ssv_parameters(project_path, resource_name=resource_name)
+
+    def update_ssv_parameter(
+        self,
+        project_path: Path | str,
+        *,
+        resource_name: str,
+        name: str,
+        new_name: str,
+        type_name: str,
+        value: str,
+    ) -> list[SSVParameterSummary]:
+        project_path = Path(project_path)
+        normalized_name = new_name.strip()
+        if not normalized_name:
+            raise ValueError("Parameter name is required")
+
+        with SSP(project_path, mode="a") as ssp:
+            resource_path = self._resource_temp_path(ssp, resource_name, suffix=".ssv")
+            with SSV(resource_path, mode="a") as ssv:
+                parameter = next((item for item in ssv.parameters if item["name"] == name), None)
+                if parameter is None:
+                    raise ValueError(f"SSV parameter does not exist: {name}")
+                if any(item["name"] == normalized_name for item in ssv.parameters if item["name"] != name):
+                    raise ValueError(f"SSV parameter already exists: {normalized_name}")
+                parameter["name"] = normalized_name
+                parameter["type_name"] = type_name
+                parameter["type_value"] = ParameterType(type_name, {"value": value})
+
+        return self.list_ssv_parameters(project_path, resource_name=resource_name)
+
+    def remove_ssv_parameter(
+        self,
+        project_path: Path | str,
+        *,
+        resource_name: str,
+        name: str,
+    ) -> list[SSVParameterSummary]:
+        project_path = Path(project_path)
+
+        with SSP(project_path, mode="a") as ssp:
+            resource_path = self._resource_temp_path(ssp, resource_name, suffix=".ssv")
+            with SSV(resource_path, mode="a") as ssv:
+                parameters = [item for item in ssv.parameters if item["name"] != name]
+                if len(parameters) == len(ssv.parameters):
+                    raise ValueError(f"SSV parameter does not exist: {name}")
+                ssv.parameters = parameters
+
+        return self.list_ssv_parameters(project_path, resource_name=resource_name)
+
+    def list_ssm_mappings(
+        self,
+        project_path: Path | str,
+        *,
+        resource_name: str,
+    ) -> list[SSMMappingSummary]:
+        project_path = Path(project_path)
+        with SSP(project_path, mode="r") as ssp:
+            resource_path = self._resource_temp_path(ssp, resource_name, suffix=".ssm")
+            with SSM(resource_path, "r") as ssm:
+                return [
+                    SSMMappingSummary(
+                        resource_name=resource_name,
+                        source=mapping["source"],
+                        target=mapping["target"],
+                        transformation_type=(
+                            mapping["transformation"].transformation_type
+                            if mapping["transformation"] is not None
+                            else None
+                        ),
+                    )
+                    for mapping in ssm.mappings
+                ]
+
+    def add_ssm_mapping(
+        self,
+        project_path: Path | str,
+        *,
+        resource_name: str,
+        source: str,
+        target: str,
+    ) -> list[SSMMappingSummary]:
+        project_path = Path(project_path)
+        normalized_source = source.strip()
+        normalized_target = target.strip()
+        if not normalized_source or not normalized_target:
+            raise ValueError("SSM source and target are required")
+
+        with SSP(project_path, mode="a") as ssp:
+            resource_path = self._resource_temp_path(ssp, resource_name, suffix=".ssm")
+            with SSM(resource_path, "a") as ssm:
+                if any(
+                    mapping["source"] == normalized_source and mapping["target"] == normalized_target
+                    for mapping in ssm.mappings
+                ):
+                    raise ValueError("SSM mapping already exists")
+                ssm.add_mapping(normalized_source, normalized_target)
+
+        return self.list_ssm_mappings(project_path, resource_name=resource_name)
+
+    def update_ssm_mapping(
+        self,
+        project_path: Path | str,
+        *,
+        resource_name: str,
+        source: str,
+        target: str,
+        new_source: str,
+        new_target: str,
+    ) -> list[SSMMappingSummary]:
+        project_path = Path(project_path)
+        normalized_source = new_source.strip()
+        normalized_target = new_target.strip()
+        if not normalized_source or not normalized_target:
+            raise ValueError("SSM source and target are required")
+
+        with SSP(project_path, mode="a") as ssp:
+            resource_path = self._resource_temp_path(ssp, resource_name, suffix=".ssm")
+            with SSM(resource_path, "a") as ssm:
+                mapping = next(
+                    (
+                        item
+                        for item in ssm.mappings
+                        if item["source"] == source and item["target"] == target
+                    ),
+                    None,
+                )
+                if mapping is None:
+                    raise ValueError("SSM mapping does not exist")
+                if any(
+                    item["source"] == normalized_source and item["target"] == normalized_target
+                    for item in ssm.mappings
+                    if not (item["source"] == source and item["target"] == target)
+                ):
+                    raise ValueError("SSM mapping already exists")
+                mapping["source"] = normalized_source
+                mapping["target"] = normalized_target
+
+        return self.list_ssm_mappings(project_path, resource_name=resource_name)
+
+    def remove_ssm_mapping(
+        self,
+        project_path: Path | str,
+        *,
+        resource_name: str,
+        source: str,
+        target: str,
+    ) -> list[SSMMappingSummary]:
+        project_path = Path(project_path)
+
+        with SSP(project_path, mode="a") as ssp:
+            resource_path = self._resource_temp_path(ssp, resource_name, suffix=".ssm")
+            with SSM(resource_path, "a") as ssm:
+                mappings = [
+                    item
+                    for item in ssm.mappings
+                    if not (item["source"] == source and item["target"] == target)
+                ]
+                if len(mappings) == len(ssm.mappings):
+                    raise ValueError("SSM mapping does not exist")
+                ssm.mappings[:] = mappings
+
+        return self.list_ssm_mappings(project_path, resource_name=resource_name)
 
     def update_block_layout(
         self,
@@ -928,6 +1209,15 @@ class SSPProjectService:
         if suffix:
             return suffix.removeprefix(".")
         return "file"
+
+    @staticmethod
+    def _resource_temp_path(ssp: SSP, resource_name: str, *, suffix: str) -> Path:
+        resource_path = ssp.ssp_resource_path / resource_name
+        if not resource_path.exists():
+            raise FileNotFoundError(resource_name)
+        if resource_path.suffix.lower() != suffix:
+            raise ValueError(f"Resource is not a {suffix} file: {resource_name}")
+        return resource_path
 
     @staticmethod
     def _parent_path(path: str | None) -> str | None:

@@ -22,6 +22,22 @@ class VariableSummary:
 
 
 @dataclass(slots=True)
+class SSVParameterSummary:
+    resource_name: str
+    name: str
+    type_name: str
+    value: str | None = None
+
+
+@dataclass(slots=True)
+class SSMMappingSummary:
+    resource_name: str
+    source: str
+    target: str
+    transformation_type: str | None = None
+
+
+@dataclass(slots=True)
 class FMUSummary:
     resource_name: str
     model_name: str

@@ -16,6 +16,8 @@ from pyssp_standard.ssp import SSP
 RESOURCE_ROOT = Path("resources")
 EMBRACE_SSP = RESOURCE_ROOT / "embrace.ssp"
 DCMOTOR_SSP = RESOURCE_ROOT / "dcmotor.ssp"
+SSV_FIXTURE = Path("3rd_party/pyssp_standard/pytest/doc/embrace/resources/RAPID_Systems_2021-03-29_Test_1.ssv")
+SSM_FIXTURE = Path("3rd_party/pyssp_standard/pytest/doc/embrace/resources/ECS_HW.ssm")
 
 
 def _extract_fmu_from_ssp(ssp_path: Path, member_name: str, target_dir: Path) -> Path:
@@ -206,6 +208,167 @@ def test_add_system_connector_and_connection_round_trip(tmp_path):
         end_owner_path="system",
         end_element=None,
         end_connector="controller_input",
+    )
+    assert not any(
+        connection.start_element is None
+        and connection.start_connector == "driver_signal"
+        and connection.end_element is None
+        and connection.end_connector == "controller_input"
+        for connection in snapshot.connections
+    )
+
+
+def test_update_system_connector_updates_attached_connections(tmp_path):
+    project_path = tmp_path / "update-connector-demo.ssp"
+    service = SSPProjectService()
+
+    service.create_project(project_path)
+    service.add_system_connector(project_path, name="driver_signal", kind="output", type_name="Real")
+    service.add_system_connector(project_path, name="controller_input", kind="input", type_name="Real")
+    service.add_connection(
+        project_path,
+        system_path="system",
+        start_owner_path="system",
+        start_element=None,
+        start_connector="driver_signal",
+        end_owner_path="system",
+        end_element=None,
+        end_connector="controller_input",
+    )
+
+    snapshot = service.update_system_connector(
+        project_path,
+        system_path="system",
+        name="driver_signal",
+        new_name="driver_signal_renamed",
+        kind="output",
+        type_name="Integer",
+    )
+
+    assert any(
+        connector.owner_path == "system"
+        and connector.name == "driver_signal_renamed"
+        and connector.type_name == "TypeInteger"
+        for connector in snapshot.connectors
+    )
+    assert any(
+        connection.start_element is None
+        and connection.start_connector == "driver_signal_renamed"
+        and connection.end_element is None
+        and connection.end_connector == "controller_input"
+        for connection in snapshot.connections
+    )
+
+
+def test_ssv_parameter_crud_round_trip(tmp_path):
+    project_path = tmp_path / "ssv-demo.ssp"
+    service = SSPProjectService()
+
+    service.create_project(project_path)
+    service.import_fmu(project_path, _extract_fmu_from_ssp(EMBRACE_SSP, "resources/0001_ECS_HW.fmu", tmp_path))
+    with SSP(project_path, mode="a") as ssp:
+        ssp.add_resource(SSV_FIXTURE)
+
+    parameters = service.list_ssv_parameters(project_path, resource_name=SSV_FIXTURE.name)
+    assert parameters
+
+    parameters = service.add_ssv_parameter(
+        project_path,
+        resource_name=SSV_FIXTURE.name,
+        name="new_parameter",
+        type_name="Real",
+        value="12.5",
+    )
+    assert any(parameter.name == "new_parameter" and parameter.value == "12.5" for parameter in parameters)
+
+    parameters = service.update_ssv_parameter(
+        project_path,
+        resource_name=SSV_FIXTURE.name,
+        name="new_parameter",
+        new_name="renamed_parameter",
+        type_name="Integer",
+        value="7",
+    )
+    assert any(
+        parameter.name == "renamed_parameter"
+        and parameter.type_name == "Integer"
+        and parameter.value == "7"
+        for parameter in parameters
+    )
+
+    parameters = service.remove_ssv_parameter(
+        project_path,
+        resource_name=SSV_FIXTURE.name,
+        name="renamed_parameter",
+    )
+    assert not any(parameter.name == "renamed_parameter" for parameter in parameters)
+
+
+def test_ssm_mapping_crud_round_trip(tmp_path):
+    project_path = tmp_path / "ssm-demo.ssp"
+    service = SSPProjectService()
+
+    service.create_project(project_path)
+    with SSP(project_path, mode="a") as ssp:
+        ssp.add_resource(SSM_FIXTURE)
+
+    mappings = service.list_ssm_mappings(project_path, resource_name=SSM_FIXTURE.name)
+    assert mappings
+
+    mappings = service.add_ssm_mapping(
+        project_path,
+        resource_name=SSM_FIXTURE.name,
+        source="a",
+        target="b",
+    )
+    assert any(mapping.source == "a" and mapping.target == "b" for mapping in mappings)
+
+    mappings = service.update_ssm_mapping(
+        project_path,
+        resource_name=SSM_FIXTURE.name,
+        source="a",
+        target="b",
+        new_source="c",
+        new_target="d",
+    )
+    assert any(mapping.source == "c" and mapping.target == "d" for mapping in mappings)
+
+    mappings = service.remove_ssm_mapping(
+        project_path,
+        resource_name=SSM_FIXTURE.name,
+        source="c",
+        target="d",
+    )
+    assert not any(mapping.source == "c" and mapping.target == "d" for mapping in mappings)
+
+
+def test_remove_system_connector_removes_attached_connections(tmp_path):
+    project_path = tmp_path / "remove-connector-demo.ssp"
+    service = SSPProjectService()
+
+    service.create_project(project_path)
+    service.add_system_connector(project_path, name="driver_signal", kind="output", type_name="Real")
+    service.add_system_connector(project_path, name="controller_input", kind="input", type_name="Real")
+    service.add_connection(
+        project_path,
+        system_path="system",
+        start_owner_path="system",
+        start_element=None,
+        start_connector="driver_signal",
+        end_owner_path="system",
+        end_element=None,
+        end_connector="controller_input",
+    )
+
+    snapshot = service.remove_system_connector(
+        project_path,
+        system_path="system",
+        name="driver_signal",
+    )
+
+    assert not any(
+        connector.owner_path == "system" and connector.name == "driver_signal"
+        for connector in snapshot.connectors
     )
     assert not any(
         connection.start_element is None
