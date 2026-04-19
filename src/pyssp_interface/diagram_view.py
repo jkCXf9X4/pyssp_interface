@@ -11,6 +11,7 @@ from PySide6.QtWidgets import (
     QGraphicsView,
 )
 
+from pyssp_interface.state.diagram_layout import SystemLayout
 from pyssp_interface.state.project_state import ConnectionSummary, ConnectorSummary, StructureNode
 
 
@@ -21,19 +22,27 @@ class _BlockGeometry:
 
 
 class _SelectableRectItem(QGraphicsRectItem):
-    def __init__(self, path: str, node_kind: str, rect: QRectF, on_activate):
+    def __init__(self, path: str, node_kind: str, rect: QRectF, on_activate, on_moved):
         super().__init__(rect)
         self.path = path
         self.node_kind = node_kind
         self._on_activate = on_activate
+        self._on_moved = on_moved
+        self.setFlag(QGraphicsRectItem.ItemIsMovable, True)
+        self.setFlag(QGraphicsRectItem.ItemSendsGeometryChanges, True)
 
     def mousePressEvent(self, event):
         self._on_activate(self.path)
         super().mousePressEvent(event)
 
+    def mouseReleaseEvent(self, event):
+        self._on_moved(self.path, self.sceneBoundingRect().topLeft())
+        super().mouseReleaseEvent(event)
+
 
 class DiagramView(QGraphicsView):
     pathActivated = Signal(str)
+    blockMoved = Signal(str, str, float, float)
 
     def __init__(self):
         super().__init__()
@@ -46,7 +55,12 @@ class DiagramView(QGraphicsView):
         self._highlighted_path: str | None = None
         self._current_system_path: str | None = None
 
-    def render_system(self, node: StructureNode | None) -> None:
+    def render_system(
+        self,
+        node: StructureNode | None,
+        *,
+        layout: SystemLayout | None = None,
+    ) -> None:
         self._scene.clear()
         self._item_by_path.clear()
         self._current_system_path = None
@@ -72,11 +86,7 @@ class DiagramView(QGraphicsView):
 
         system_left_x = 40
         system_right_x = 980
-        center_x = 280
         top_y = 120
-        block_width = 240
-        block_height = 84
-        block_gap = 34
 
         block_geometries: dict[str, _BlockGeometry] = {}
 
@@ -84,9 +94,14 @@ class DiagramView(QGraphicsView):
         self._draw_system_connector_column(right_connectors, system_right_x, top_y, align_right=True)
         self._draw_system_connector_column(other_connectors, 40, top_y + 320, align_right=False)
 
-        for index, child in enumerate(node.children):
-            y = top_y + index * (block_height + block_gap)
-            rect = QRectF(center_x, y, block_width, block_height)
+        for child in node.children:
+            block_layout = layout.blocks.get(child.path) if layout is not None else None
+            rect = QRectF(
+                block_layout.x if block_layout is not None else 280.0,
+                block_layout.y if block_layout is not None else top_y,
+                block_layout.width if block_layout is not None else 240.0,
+                block_layout.height if block_layout is not None else 84.0,
+            )
             self._draw_block(child, rect)
             block_geometries[child.path] = _BlockGeometry(path=child.path, rect=rect)
 
@@ -120,30 +135,38 @@ class DiagramView(QGraphicsView):
             fill = QColor("#f0dcc4")
             subtitle = "FMU Component"
 
-        box = _SelectableRectItem(node.path, node.node_kind, rect, self.pathActivated.emit)
+        box = _SelectableRectItem(
+            node.path,
+            node.node_kind,
+            rect,
+            self.pathActivated.emit,
+            self._emit_block_moved,
+        )
         box.setBrush(QBrush(fill))
         box.setPen(QPen(QColor("#344054"), 1.5))
         box.setCursor(Qt.PointingHandCursor)
         self._scene.addItem(box)
         self._item_by_path[node.path] = box
 
-        title = QGraphicsSimpleTextItem(node.name)
+        title = QGraphicsSimpleTextItem(node.name, box)
         title.setBrush(QBrush(QColor("#0f172a")))
-        title.setPos(rect.x() + 12, rect.y() + 10)
-        self._scene.addItem(title)
+        title.setPos(12, 10)
 
-        subtitle_item = QGraphicsSimpleTextItem(subtitle)
+        subtitle_item = QGraphicsSimpleTextItem(subtitle, box)
         subtitle_item.setBrush(QBrush(QColor("#475467")))
-        subtitle_item.setPos(rect.x() + 12, rect.y() + 34)
-        self._scene.addItem(subtitle_item)
+        subtitle_item.setPos(12, 34)
 
         meta = f"{len(node.connectors)} connectors"
         if node.node_kind == "system":
             meta += f", {len(node.children)} children"
-        meta_item = QGraphicsSimpleTextItem(meta)
+        meta_item = QGraphicsSimpleTextItem(meta, box)
         meta_item.setBrush(QBrush(QColor("#475467")))
-        meta_item.setPos(rect.x() + 12, rect.y() + 56)
-        self._scene.addItem(meta_item)
+        meta_item.setPos(12, 56)
+
+    def _emit_block_moved(self, path: str, position: QPointF) -> None:
+        if self._current_system_path is None:
+            return
+        self.blockMoved.emit(self._current_system_path, path, position.x(), position.y())
 
     def _draw_system_connector_column(
         self,

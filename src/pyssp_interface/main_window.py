@@ -26,6 +26,7 @@ from pyssp_interface.presentation.formatters import (
     format_system_summary,
 )
 from pyssp_interface.services.project_service import SSPProjectService
+from pyssp_interface.state.diagram_layout import DiagramLayoutStore
 from pyssp_interface.state.project_state import (
     ComponentSummary,
     ConnectionSummary,
@@ -43,6 +44,7 @@ class MainWindow(QMainWindow):
         self.project_service = project_service or SSPProjectService()
         self.project: ProjectSnapshot | None = None
         self.repo_root = Path(__file__).resolve().parents[2]
+        self.diagram_layouts = DiagramLayoutStore()
 
         self.setWindowTitle("pyssp_interface")
         self.resize(1280, 780)
@@ -56,6 +58,7 @@ class MainWindow(QMainWindow):
 
         self.diagram_view = DiagramView()
         self.diagram_view.pathActivated.connect(self._select_tree_path_from_diagram)
+        self.diagram_view.blockMoved.connect(self._update_diagram_layout)
 
         self.variable_table = self._create_table(
             ["FMU", "Name", "Causality", "Variability", "Type", "Description"]
@@ -381,8 +384,10 @@ class MainWindow(QMainWindow):
         self._populate_structure(snapshot.components, snapshot.connectors, snapshot.connections)
         self._populate_validation(snapshot)
         self.details_panel.setPlainText(format_project_summary(snapshot))
-        self.diagram_view.render_system(snapshot.structure_tree)
-        self.diagram_view.set_highlighted_path(snapshot.structure_tree.path if snapshot.structure_tree else None)
+        self._render_diagram(
+            snapshot.structure_tree,
+            highlight_path=snapshot.structure_tree.path if snapshot.structure_tree else None,
+        )
         self.explorer_tabs.setCurrentWidget(self.details_panel)
 
     def _populate_validation(self, snapshot: ProjectSnapshot) -> None:
@@ -437,9 +442,9 @@ class MainWindow(QMainWindow):
                 self.project.connectors,
                 self.project.connections,
             )
-            self.diagram_view.render_system(self.project.structure_tree)
-            self.diagram_view.set_highlighted_path(
-                self.project.structure_tree.path if self.project.structure_tree else None
+            self._render_diagram(
+                self.project.structure_tree,
+                highlight_path=self.project.structure_tree.path if self.project.structure_tree else None,
             )
             self.explorer_tabs.setCurrentWidget(self.details_panel)
             return
@@ -459,8 +464,7 @@ class MainWindow(QMainWindow):
         if kind == "fmus":
             self.details_panel.setPlainText(f"{len(self.project.fmus)} FMUs")
             self._populate_variables(self.project.fmus)
-            self.diagram_view.render_system(self.project.structure_tree)
-            self.diagram_view.set_highlighted_path(None)
+            self._render_diagram(self.project.structure_tree, highlight_path=None)
             self.explorer_tabs.setCurrentWidget(self.variable_table)
             return
 
@@ -486,8 +490,7 @@ class MainWindow(QMainWindow):
                     for variable in fmu.variables
                 ],
             )
-            self.diagram_view.render_system(self.project.structure_tree)
-            self.diagram_view.set_highlighted_path(None)
+            self._render_diagram(self.project.structure_tree, highlight_path=None)
             self.explorer_tabs.setCurrentWidget(self.variable_table)
             return
 
@@ -509,8 +512,7 @@ class MainWindow(QMainWindow):
                 [self._connector_row(connector) for connector in node.connectors],
             )
             parent_system = self._find_parent_system(node.path)
-            self.diagram_view.render_system(parent_system)
-            self.diagram_view.set_highlighted_path(node.path)
+            self._render_diagram(parent_system, highlight_path=node.path)
             self.explorer_tabs.setCurrentWidget(self.structure_tabs)
             self.structure_tabs.setCurrentWidget(self.component_table)
             return
@@ -528,8 +530,7 @@ class MainWindow(QMainWindow):
                 self.connection_table,
                 [self._connection_row(connection) for connection in node.connections],
             )
-            self.diagram_view.render_system(node)
-            self.diagram_view.set_highlighted_path(node.path)
+            self._render_diagram(node, highlight_path=node.path)
             self.explorer_tabs.setCurrentWidget(self.structure_tabs)
             self.structure_tabs.setCurrentWidget(self.connector_table)
             return
@@ -545,8 +546,7 @@ class MainWindow(QMainWindow):
                 self.connector_table,
                 [self._connector_row(connector) for connector in connectors],
             )
-            self.diagram_view.render_system(self._diagram_scope_for_path(owner_path))
-            self.diagram_view.set_highlighted_path(owner_path)
+            self._render_diagram(self._diagram_scope_for_path(owner_path), highlight_path=owner_path)
             self.explorer_tabs.setCurrentWidget(self.structure_tabs)
             self.structure_tabs.setCurrentWidget(self.connector_table)
             return
@@ -557,8 +557,10 @@ class MainWindow(QMainWindow):
                 return
             self.details_panel.setPlainText(format_connector_summary(connector))
             self._set_table_rows(self.connector_table, [self._connector_row(connector)])
-            self.diagram_view.render_system(self._diagram_scope_for_path(payload.get("owner_path")))
-            self.diagram_view.set_highlighted_path(payload.get("owner_path"))
+            self._render_diagram(
+                self._diagram_scope_for_path(payload.get("owner_path")),
+                highlight_path=payload.get("owner_path"),
+            )
             self.explorer_tabs.setCurrentWidget(self.structure_tabs)
             self.structure_tabs.setCurrentWidget(self.connector_table)
             return
@@ -574,8 +576,7 @@ class MainWindow(QMainWindow):
                 self.connection_table,
                 [self._connection_row(connection) for connection in connections],
             )
-            self.diagram_view.render_system(self._diagram_scope_for_path(owner_path))
-            self.diagram_view.set_highlighted_path(owner_path)
+            self._render_diagram(self._diagram_scope_for_path(owner_path), highlight_path=owner_path)
             self.explorer_tabs.setCurrentWidget(self.structure_tabs)
             self.structure_tabs.setCurrentWidget(self.connection_table)
             return
@@ -586,8 +587,10 @@ class MainWindow(QMainWindow):
                 return
             self.details_panel.setPlainText(format_connection_summary(connection))
             self._set_table_rows(self.connection_table, [self._connection_row(connection)])
-            self.diagram_view.render_system(self._find_structure_node(payload.get("owner_path")))
-            self.diagram_view.set_highlighted_path(payload.get("owner_path"))
+            self._render_diagram(
+                self._find_structure_node(payload.get("owner_path")),
+                highlight_path=payload.get("owner_path"),
+            )
             self.explorer_tabs.setCurrentWidget(self.structure_tabs)
             self.structure_tabs.setCurrentWidget(self.connection_table)
 
@@ -718,6 +721,36 @@ class MainWindow(QMainWindow):
             return
         self.project_tree.setCurrentItem(item)
         self.explorer_tabs.setCurrentWidget(self.diagram_view)
+
+    def _update_diagram_layout(
+        self,
+        system_path: str,
+        block_path: str,
+        x: float,
+        y: float,
+    ) -> None:
+        self.diagram_layouts.update_block_position(system_path, block_path, x=x, y=y)
+        current_node = self._find_structure_node(system_path)
+        if current_node is None:
+            return
+        self._render_diagram(current_node, highlight_path=self._current_diagram_highlight_path())
+
+    def _render_diagram(
+        self,
+        node: StructureNode | None,
+        *,
+        highlight_path: str | None,
+    ) -> None:
+        self.diagram_view.render_system(
+            node,
+            layout=self.diagram_layouts.layout_for(node),
+        )
+        self.diagram_view.set_highlighted_path(highlight_path)
+
+    def _current_diagram_highlight_path(self) -> str | None:
+        return self.project_tree.current_payload().get("path") or self.project_tree.current_payload().get(
+            "owner_path"
+        )
 
     def _root_system_path(self) -> str | None:
         if self.project is None or self.project.structure_tree is None:
