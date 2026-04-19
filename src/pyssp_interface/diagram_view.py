@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from PySide6.QtCore import QPointF, QRectF, Qt, Signal
+from PySide6.QtCore import QPointF, QRectF, Qt, QTimer, Signal
 from PySide6.QtGui import QBrush, QColor, QPainter, QPen
 from PySide6.QtWidgets import (
     QGraphicsEllipseItem,
@@ -34,12 +34,13 @@ class _SelectableRectItem(QGraphicsRectItem):
         self.setFlag(QGraphicsRectItem.ItemSendsGeometryChanges, True)
 
     def mousePressEvent(self, event):
-        self._on_activate(self.path)
         super().mousePressEvent(event)
+        QTimer.singleShot(0, lambda path=self.path: self._on_activate(path))
 
     def mouseReleaseEvent(self, event):
-        self._on_moved(self.path, self.sceneBoundingRect().topLeft())
         super().mouseReleaseEvent(event)
+        position = self.sceneBoundingRect().topLeft()
+        QTimer.singleShot(0, lambda path=self.path, pos=position: self._on_moved(path, pos))
 
 
 class _EndpointItem(QGraphicsEllipseItem):
@@ -51,8 +52,14 @@ class _EndpointItem(QGraphicsEllipseItem):
         self.setCursor(Qt.PointingHandCursor)
 
     def mousePressEvent(self, event):
-        self._on_activate(self.owner_path, self.connector_name)
         super().mousePressEvent(event)
+        QTimer.singleShot(
+            0,
+            lambda owner_path=self.owner_path, connector_name=self.connector_name: self._on_activate(
+                owner_path,
+                connector_name,
+            ),
+        )
 
 
 class _SelectableConnectionItem(QGraphicsLineItem):
@@ -64,8 +71,11 @@ class _SelectableConnectionItem(QGraphicsLineItem):
         self.setCursor(Qt.PointingHandCursor)
 
     def mousePressEvent(self, event):
-        self._on_activate(self.owner_path, self.key)
         super().mousePressEvent(event)
+        QTimer.singleShot(
+            0,
+            lambda owner_path=self.owner_path, key=self.key: self._on_activate(owner_path, key),
+        )
 
 
 class DiagramView(QGraphicsView):
