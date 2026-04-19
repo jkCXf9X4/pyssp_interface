@@ -133,8 +133,18 @@ class MainWindow(QMainWindow):
         add_connection_action = authoring_menu.addAction("Add Connection...")
         add_connection_action.triggered.connect(self._add_connection)
 
+        edit_component_action = authoring_menu.addAction("Edit Selected Component...")
+        edit_component_action.triggered.connect(self._edit_selected_component)
+
+        edit_connection_action = authoring_menu.addAction("Edit Selected Connection...")
+        edit_connection_action.triggered.connect(self._edit_selected_connection)
+
+        remove_component_action = authoring_menu.addAction("Remove Selected Component")
+        remove_component_action.setShortcut(Qt.Key_Delete)
+        remove_component_action.triggered.connect(self._delete_selected_item)
+
         remove_connection_action = authoring_menu.addAction("Remove Selected Connection")
-        remove_connection_action.triggered.connect(self._remove_selected_connection)
+        remove_connection_action.triggered.connect(self._delete_selected_item)
 
         embrace_action = sample_menu.addAction("Open Embrace Sample")
         embrace_action.triggered.connect(
@@ -332,7 +342,100 @@ class MainWindow(QMainWindow):
         self._load_snapshot(snapshot)
         self.statusBar().showMessage("Added connection")
 
-    def _remove_selected_connection(self) -> None:
+    def _delete_selected_item(self) -> None:
+        if self.project is None:
+            QMessageBox.information(self, "No project", "Create or open an SSP project first.")
+            return
+
+        connection = self._selected_connection_for_removal()
+        if connection is not None:
+            try:
+                snapshot = self.project_service.remove_connection(
+                    self.project.project_path,
+                    system_path=connection.owner_path,
+                    start_owner_path=self._connection_endpoint_owner_path(
+                        connection.owner_path,
+                        connection.start_element,
+                    ),
+                    start_element=None,
+                    start_connector=connection.start_connector,
+                    end_owner_path=self._connection_endpoint_owner_path(
+                        connection.owner_path,
+                        connection.end_element,
+                    ),
+                    end_element=None,
+                    end_connector=connection.end_connector,
+                )
+            except Exception as exc:
+                QMessageBox.critical(self, "Remove connection failed", str(exc))
+                return
+
+            self._load_snapshot(snapshot)
+            self.statusBar().showMessage("Removed connection")
+            return
+
+        element_path = self._selected_element_path_for_removal()
+        if element_path is not None:
+            try:
+                snapshot = self.project_service.remove_element(
+                    self.project.project_path,
+                    element_path=element_path,
+                )
+            except Exception as exc:
+                QMessageBox.critical(self, "Remove component failed", str(exc))
+                return
+
+            self._load_snapshot(snapshot)
+            self.statusBar().showMessage(f"Removed {element_path}")
+            return
+
+        QMessageBox.information(
+            self,
+            "Nothing removable selected",
+            "Select a connection or component in the project tree or diagram first.",
+        )
+
+    def _edit_selected_component(self) -> None:
+        if self.project is None:
+            QMessageBox.information(self, "No project", "Create or open an SSP project first.")
+            return
+
+        element_path = self._selected_element_path_for_removal()
+        if element_path is None:
+            QMessageBox.information(
+                self,
+                "No component selected",
+                "Select a component in the project tree or diagram first.",
+            )
+            return
+
+        node = self._find_structure_node(element_path)
+        if node is None:
+            return
+
+        name, ok = QInputDialog.getText(
+            self,
+            "Edit Component",
+            "Component name:",
+            text=node.name,
+        )
+        if not ok or not name.strip() or name.strip() == node.name:
+            return
+
+        try:
+            snapshot = self.project_service.rename_element(
+                self.project.project_path,
+                element_path=element_path,
+                new_name=name,
+            )
+        except Exception as exc:
+            QMessageBox.critical(self, "Edit component failed", str(exc))
+            return
+
+        self._load_snapshot(snapshot)
+        self.statusBar().showMessage(f"Renamed component to {name.strip()}")
+
+    def _edit_selected_connection(self) -> None:
         if self.project is None:
             QMessageBox.information(self, "No project", "Create or open an SSP project first.")
             return
@@ -346,29 +449,87 @@ class MainWindow(QMainWindow):
             )
             return
 
+        endpoint_items = self._connection_endpoint_items_for_system(connection.owner_path)
+        if len(endpoint_items) < 2:
+            QMessageBox.information(
+                self,
+                "Not enough connectors",
+                "Add at least two connectors in the selected system scope before editing a connection.",
+            )
+            return
+
+        current_start = self._format_endpoint_label(
+            self._connection_endpoint_owner_path(connection.owner_path, connection.start_element),
+            connection.start_connector,
+        )
+        current_end = self._format_endpoint_label(
+            self._connection_endpoint_owner_path(connection.owner_path, connection.end_element),
+            connection.end_connector,
+        )
+        start_index = endpoint_items.index(current_start) if current_start in endpoint_items else 0
+        end_index = endpoint_items.index(current_end) if current_end in endpoint_items else 0
+
+        start_label, ok = QInputDialog.getItem(
+            self,
+            "Edit Connection",
+            "Start endpoint:",
+            endpoint_items,
+            start_index,
+            editable=False,
+        )
+        if not ok:
+            return
+
+        end_label, ok = QInputDialog.getItem(
+            self,
+            "Edit Connection",
+            "End endpoint:",
+            endpoint_items,
+            end_index,
+            editable=False,
+        )
+        if not ok:
+            return
+
+        start_owner_path, start_connector = self._parse_endpoint_label(start_label)
+        end_owner_path, end_connector = self._parse_endpoint_label(end_label)
+        if (start_owner_path, start_connector) == (end_owner_path, end_connector):
+            QMessageBox.information(
+                self,
+                "Invalid connection",
+                "Start and end endpoints must be different.",
+            )
+            return
+
         try:
-            snapshot = self.project_service.remove_connection(
+            snapshot = self.project_service.update_connection(
                 self.project.project_path,
                 system_path=connection.owner_path,
-                start_owner_path=self._connection_endpoint_owner_path(
+                old_start_owner_path=self._connection_endpoint_owner_path(
                     connection.owner_path,
                     connection.start_element,
                 ),
-                start_element=None,
-                start_connector=connection.start_connector,
-                end_owner_path=self._connection_endpoint_owner_path(
+                old_start_element=None,
+                old_start_connector=connection.start_connector,
+                old_end_owner_path=self._connection_endpoint_owner_path(
                     connection.owner_path,
                     connection.end_element,
                 ),
-                end_element=None,
-                end_connector=connection.end_connector,
+                old_end_element=None,
+                old_end_connector=connection.end_connector,
+                new_start_owner_path=start_owner_path,
+                new_start_element=None,
+                new_start_connector=start_connector,
+                new_end_owner_path=end_owner_path,
+                new_end_element=None,
+                new_end_connector=end_connector,
             )
         except Exception as exc:
-            QMessageBox.critical(self, "Remove connection failed", str(exc))
+            QMessageBox.critical(self, "Edit connection failed", str(exc))
             return
 
         self._load_snapshot(snapshot)
-        self.statusBar().showMessage("Removed connection")
+        self.statusBar().showMessage("Updated connection")
 
     def _load_snapshot(self, snapshot: ProjectSnapshot) -> None:
         self.project = snapshot
@@ -626,7 +787,10 @@ class MainWindow(QMainWindow):
         return root_path
 
     def _connection_endpoint_items(self) -> list[str]:
-        node = self._find_structure_node(self._current_system_scope_path())
+        return self._connection_endpoint_items_for_system(self._current_system_scope_path())
+
+    def _connection_endpoint_items_for_system(self, system_path: str | None) -> list[str]:
+        node = self._find_structure_node(system_path)
         if node is None or node.node_kind != "system":
             return []
 
@@ -869,6 +1033,12 @@ class MainWindow(QMainWindow):
         if payload.get("kind") != "connection":
             return None
         return self._find_connection(payload.get("owner_path"), payload.get("key"))
+
+    def _selected_element_path_for_removal(self) -> str | None:
+        payload = self.project_tree.current_payload()
+        if payload.get("kind") != "component":
+            return None
+        return payload.get("path")
 
     @staticmethod
     def _component_row(component: ComponentSummary) -> list[str]:

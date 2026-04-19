@@ -98,6 +98,65 @@ def test_add_component_from_imported_fmu_creates_structure(tmp_path):
     assert snapshot.connections
 
 
+def test_remove_element_removes_component_and_attached_connections(tmp_path):
+    project_path = tmp_path / "remove-element-demo.ssp"
+    service = SSPProjectService()
+    fmu_path = _extract_fmu_from_ssp(
+        DCMOTOR_SSP,
+        "resources/emachine_model.fmu",
+        tmp_path,
+    )
+
+    service.create_project(project_path)
+    service.import_fmu(project_path, fmu_path)
+    snapshot = service.add_component_from_fmu(project_path, fmu_path.name)
+
+    component_name = next(component.name for component in snapshot.components)
+    snapshot = service.remove_element(project_path, element_path=f"system/{component_name}")
+
+    assert not any(component.name == component_name for component in snapshot.components)
+    assert not any(
+        connection.start_element == component_name or connection.end_element == component_name
+        for connection in snapshot.connections
+    )
+
+
+def test_rename_element_updates_connections_and_layout(tmp_path):
+    project_path = tmp_path / "rename-element-demo.ssp"
+    service = SSPProjectService()
+    fmu_path = _extract_fmu_from_ssp(
+        DCMOTOR_SSP,
+        "resources/emachine_model.fmu",
+        tmp_path,
+    )
+
+    service.create_project(project_path)
+    service.import_fmu(project_path, fmu_path)
+    snapshot = service.add_component_from_fmu(project_path, fmu_path.name)
+    component_name = next(component.name for component in snapshot.components)
+    service.update_block_layout(
+        project_path,
+        system_path="system",
+        block_path=f"system/{component_name}",
+        x=420.0,
+        y=260.0,
+    )
+
+    snapshot = service.rename_element(
+        project_path,
+        element_path=f"system/{component_name}",
+        new_name="renamed_component",
+    )
+
+    assert any(component.name == "renamed_component" for component in snapshot.components)
+    assert not any(component.name == component_name for component in snapshot.components)
+    assert all(
+        connection.start_element != component_name and connection.end_element != component_name
+        for connection in snapshot.connections
+    )
+    assert snapshot.diagram_layouts["system"]["system/renamed_component"] == (420.0, 260.0, 240.0, 84.0)
+
+
 def test_add_system_connector_and_connection_round_trip(tmp_path):
     project_path = tmp_path / "connection-demo.ssp"
     service = SSPProjectService()
@@ -147,6 +206,58 @@ def test_add_system_connector_and_connection_round_trip(tmp_path):
         end_owner_path="system",
         end_element=None,
         end_connector="controller_input",
+    )
+    assert not any(
+        connection.start_element is None
+        and connection.start_connector == "driver_signal"
+        and connection.end_element is None
+        and connection.end_connector == "controller_input"
+        for connection in snapshot.connections
+    )
+
+
+def test_update_connection_replaces_endpoints(tmp_path):
+    project_path = tmp_path / "update-connection-demo.ssp"
+    service = SSPProjectService()
+
+    service.create_project(project_path)
+    service.add_system_connector(project_path, name="driver_signal", kind="output", type_name="Real")
+    service.add_system_connector(project_path, name="controller_input", kind="input", type_name="Real")
+    service.add_system_connector(project_path, name="controller_input_2", kind="input", type_name="Real")
+    service.add_connection(
+        project_path,
+        system_path="system",
+        start_owner_path="system",
+        start_element=None,
+        start_connector="driver_signal",
+        end_owner_path="system",
+        end_element=None,
+        end_connector="controller_input",
+    )
+
+    snapshot = service.update_connection(
+        project_path,
+        system_path="system",
+        old_start_owner_path="system",
+        old_start_element=None,
+        old_start_connector="driver_signal",
+        old_end_owner_path="system",
+        old_end_element=None,
+        old_end_connector="controller_input",
+        new_start_owner_path="system",
+        new_start_element=None,
+        new_start_connector="driver_signal",
+        new_end_owner_path="system",
+        new_end_element=None,
+        new_end_connector="controller_input_2",
+    )
+
+    assert any(
+        connection.start_element is None
+        and connection.start_connector == "driver_signal"
+        and connection.end_element is None
+        and connection.end_connector == "controller_input_2"
+        for connection in snapshot.connections
     )
     assert not any(
         connection.start_element is None
@@ -236,6 +347,33 @@ def test_nested_authoring_targets_selected_subsystem(tmp_path):
         and connection.end_connector == "U"
         for connection in snapshot.connections
     )
+
+
+def test_remove_element_rejects_root_path(tmp_path):
+    project_path = tmp_path / "remove-root-demo.ssp"
+    service = SSPProjectService()
+
+    service.create_project(project_path)
+
+    with pytest.raises(ValueError, match="Cannot remove root element"):
+        service.remove_element(project_path, element_path="system")
+
+
+def test_rename_element_rejects_duplicates(tmp_path):
+    project_path = tmp_path / "rename-duplicate-demo.ssp"
+    service = SSPProjectService()
+
+    service.create_project(project_path)
+    with SSP(project_path, mode="a") as ssp:
+        with ssp.system_structure as ssd:
+            first = Component(None)
+            first.name = "A"
+            second = Component(None)
+            second.name = "B"
+            ssd.system.elements.extend([first, second])
+
+    with pytest.raises(ValueError, match="Element already exists: B"):
+        service.rename_element(project_path, element_path="system/A", new_name="B")
 
 
 def test_add_connection_rejects_endpoints_outside_selected_system_scope(tmp_path):

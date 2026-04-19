@@ -296,6 +296,190 @@ class SSPProjectService:
 
         return self.open_project(project_path)
 
+    def remove_element(
+        self,
+        project_path: Path | str,
+        *,
+        element_path: str,
+    ) -> ProjectSnapshot:
+        project_path = Path(project_path)
+        system_path = self._parent_path(element_path)
+        if system_path is None:
+            raise ValueError(f"Cannot remove root element: {element_path}")
+
+        element_name = element_path.rsplit("/", 1)[-1]
+
+        with SSP(project_path, mode="a") as ssp:
+            with ssp.system_structure as ssd:
+                if ssd.system is None:
+                    raise ValueError("Project has no system structure")
+
+                _, target_system = self._resolve_system_path_and_object(ssd, system_path)
+                matching_elements = [
+                    element
+                    for element in target_system.elements
+                    if getattr(element, "name", None) == element_name
+                ]
+                if not matching_elements:
+                    raise ValueError(f"Element does not exist: {element_path}")
+
+                target_system.elements.remove(matching_elements[0])
+                target_system.connections = [
+                    connection
+                    for connection in target_system.connections
+                    if connection.start_element != element_name and connection.end_element != element_name
+                ]
+
+        return self.open_project(project_path)
+
+    def rename_element(
+        self,
+        project_path: Path | str,
+        *,
+        element_path: str,
+        new_name: str,
+    ) -> ProjectSnapshot:
+        project_path = Path(project_path)
+        system_path = self._parent_path(element_path)
+        if system_path is None:
+            raise ValueError(f"Cannot rename root element: {element_path}")
+
+        normalized_name = new_name.strip()
+        if not normalized_name:
+            raise ValueError("Element name is required")
+
+        element_name = element_path.rsplit("/", 1)[-1]
+
+        with SSP(project_path, mode="a") as ssp:
+            with ssp.system_structure as ssd:
+                if ssd.system is None:
+                    raise ValueError("Project has no system structure")
+
+                _, target_system = self._resolve_system_path_and_object(ssd, system_path)
+                matching_elements = [
+                    element
+                    for element in target_system.elements
+                    if getattr(element, "name", None) == element_name
+                ]
+                if not matching_elements:
+                    raise ValueError(f"Element does not exist: {element_path}")
+                if any(
+                    getattr(element, "name", None) == normalized_name
+                    for element in target_system.elements
+                    if getattr(element, "name", None) != element_name
+                ):
+                    raise ValueError(f"Element already exists: {normalized_name}")
+
+                element = matching_elements[0]
+                element.name = normalized_name
+                for connection in target_system.connections:
+                    if connection.start_element == element_name:
+                        connection.start_element = normalized_name
+                    if connection.end_element == element_name:
+                        connection.end_element = normalized_name
+
+                layouts = self._read_system_layout_annotation(target_system)
+                old_layout_path = element_path
+                new_layout_path = f"{system_path}/{normalized_name}"
+                if old_layout_path in layouts:
+                    layouts[new_layout_path] = layouts.pop(old_layout_path)
+                    self._write_system_layout_annotation(target_system, layouts)
+
+        return self.open_project(project_path)
+
+    def update_connection(
+        self,
+        project_path: Path | str,
+        *,
+        system_path: str | None = None,
+        old_start_owner_path: str | None = None,
+        old_start_element: str | None,
+        old_start_connector: str,
+        old_end_owner_path: str | None = None,
+        old_end_element: str | None,
+        old_end_connector: str,
+        new_start_owner_path: str | None = None,
+        new_start_element: str | None,
+        new_start_connector: str,
+        new_end_owner_path: str | None = None,
+        new_end_element: str | None,
+        new_end_connector: str,
+    ) -> ProjectSnapshot:
+        project_path = Path(project_path)
+
+        with SSP(project_path, mode="a") as ssp:
+            with ssp.system_structure as ssd:
+                if ssd.system is None:
+                    raise ValueError("Project has no system structure")
+
+                target_system_path, target_system = self._resolve_system_path_and_object(ssd, system_path)
+                normalized_old_start_owner = self._normalize_owner_path(
+                    target_system_path,
+                    old_start_owner_path,
+                    old_start_element,
+                )
+                normalized_old_end_owner = self._normalize_owner_path(
+                    target_system_path,
+                    old_end_owner_path,
+                    old_end_element,
+                )
+                self._owner_path_to_local_element(target_system_path, normalized_old_start_owner)
+                self._owner_path_to_local_element(target_system_path, normalized_old_end_owner)
+                old_connection = Connection(
+                    start_element=self._owner_path_to_local_element(
+                        target_system_path,
+                        normalized_old_start_owner,
+                    ),
+                    start_connector=old_start_connector,
+                    end_element=self._owner_path_to_local_element(
+                        target_system_path,
+                        normalized_old_end_owner,
+                    ),
+                    end_connector=old_end_connector,
+                )
+                if old_connection not in target_system.connections:
+                    raise ValueError("Connection does not exist")
+
+                normalized_new_start_owner = self._normalize_owner_path(
+                    target_system_path,
+                    new_start_owner_path,
+                    new_start_element,
+                )
+                normalized_new_end_owner = self._normalize_owner_path(
+                    target_system_path,
+                    new_end_owner_path,
+                    new_end_element,
+                )
+                self._owner_path_to_local_element(target_system_path, normalized_new_start_owner)
+                self._owner_path_to_local_element(target_system_path, normalized_new_end_owner)
+                self._validate_connection_endpoints(
+                    target_system,
+                    target_system_path,
+                    normalized_new_start_owner,
+                    new_start_connector,
+                    normalized_new_end_owner,
+                    new_end_connector,
+                )
+                new_connection = Connection(
+                    start_element=self._owner_path_to_local_element(
+                        target_system_path,
+                        normalized_new_start_owner,
+                    ),
+                    start_connector=new_start_connector,
+                    end_element=self._owner_path_to_local_element(
+                        target_system_path,
+                        normalized_new_end_owner,
+                    ),
+                    end_connector=new_end_connector,
+                )
+                if new_connection != old_connection and new_connection in target_system.connections:
+                    raise ValueError("Connection already exists")
+
+                target_system.connections.remove(old_connection)
+                target_system.connections.append(new_connection)
+
+        return self.open_project(project_path)
+
     def summarize_fmu(self, fmu_path: Path | str) -> FMUSummary:
         fmu_path = Path(fmu_path)
         with FMU(fmu_path, mode="r") as fmu:
@@ -744,6 +928,12 @@ class SSPProjectService:
         if suffix:
             return suffix.removeprefix(".")
         return "file"
+
+    @staticmethod
+    def _parent_path(path: str | None) -> str | None:
+        if not path or "/" not in path:
+            return None
+        return path.rsplit("/", 1)[0]
 
     @staticmethod
     def _connector_type_name(connector) -> str | None:
