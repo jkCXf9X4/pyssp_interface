@@ -6,6 +6,7 @@ from PySide6.QtCore import QPointF, QRectF, Qt, Signal
 from PySide6.QtGui import QBrush, QColor, QPainter, QPen
 from PySide6.QtWidgets import (
     QGraphicsEllipseItem,
+    QGraphicsLineItem,
     QGraphicsRectItem,
     QGraphicsScene,
     QGraphicsSimpleTextItem,
@@ -54,10 +55,24 @@ class _EndpointItem(QGraphicsEllipseItem):
         super().mousePressEvent(event)
 
 
+class _SelectableConnectionItem(QGraphicsLineItem):
+    def __init__(self, owner_path: str, key: tuple[str | None, str, str | None, str], on_activate):
+        super().__init__()
+        self.owner_path = owner_path
+        self.key = key
+        self._on_activate = on_activate
+        self.setCursor(Qt.PointingHandCursor)
+
+    def mousePressEvent(self, event):
+        self._on_activate(self.owner_path, self.key)
+        super().mousePressEvent(event)
+
+
 class DiagramView(QGraphicsView):
     pathActivated = Signal(str)
     blockMoved = Signal(str, str, float, float)
     endpointActivated = Signal(str, str)
+    connectionActivated = Signal(str, object)
 
     def __init__(self):
         super().__init__()
@@ -68,8 +83,10 @@ class DiagramView(QGraphicsView):
         self.setDragMode(QGraphicsView.ScrollHandDrag)
         self._item_by_path: dict[str, _SelectableRectItem] = {}
         self._endpoint_items: dict[tuple[str, str], _EndpointItem] = {}
+        self._connection_items: dict[tuple[str, tuple[str | None, str, str | None, str]], _SelectableConnectionItem] = {}
         self._highlighted_path: str | None = None
         self._selected_endpoint: tuple[str, str] | None = None
+        self._selected_connection: tuple[str, tuple[str | None, str, str | None, str]] | None = None
         self._current_system_path: str | None = None
 
     def render_system(
@@ -81,6 +98,7 @@ class DiagramView(QGraphicsView):
         self._scene.clear()
         self._item_by_path.clear()
         self._endpoint_items.clear()
+        self._connection_items.clear()
         self._current_system_path = None
         if node is None:
             self._scene.addText("Select a system to view its block diagram.")
@@ -137,6 +155,7 @@ class DiagramView(QGraphicsView):
         self.fitInView(bounds, Qt.KeepAspectRatio)
         self.set_highlighted_path(self._highlighted_path)
         self.set_selected_endpoint(self._selected_endpoint)
+        self.set_selected_connection(self._selected_connection)
 
     def set_highlighted_path(self, path: str | None) -> None:
         self._highlighted_path = path
@@ -155,6 +174,17 @@ class DiagramView(QGraphicsView):
             else:
                 item.setBrush(QBrush(QColor("#98a2b3")))
                 item.setPen(QPen(QColor("#344054"), 1))
+
+    def set_selected_connection(
+        self,
+        connection: tuple[str, tuple[str | None, str, str | None, str]] | None,
+    ) -> None:
+        self._selected_connection = connection
+        for key, item in self._connection_items.items():
+            if key == connection:
+                item.setPen(QPen(QColor("#b54708"), 3))
+            else:
+                item.setPen(QPen(QColor("#667085"), 3))
 
     @property
     def current_system_path(self) -> str | None:
@@ -315,8 +345,21 @@ class DiagramView(QGraphicsView):
         if start_point is None or end_point is None:
             return
 
-        pen = QPen(QColor("#667085"), 1.5)
-        self._scene.addLine(start_point.x(), start_point.y(), end_point.x(), end_point.y(), pen)
+        key = (
+            connection.start_element,
+            connection.start_connector,
+            connection.end_element,
+            connection.end_connector,
+        )
+        item = _SelectableConnectionItem(
+            connection.owner_path,
+            key,
+            self.connectionActivated.emit,
+        )
+        item.setLine(start_point.x(), start_point.y(), end_point.x(), end_point.y())
+        item.setPen(QPen(QColor("#667085"), 3))
+        self._scene.addItem(item)
+        self._connection_items[(connection.owner_path, key)] = item
 
     def _resolve_endpoint_point(
         self,
