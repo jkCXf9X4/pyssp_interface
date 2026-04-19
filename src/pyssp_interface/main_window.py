@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (
     QTabWidget,
 )
 
+from pyssp_interface.diagram_controller import DiagramController
 from pyssp_interface.diagram_view import DiagramView
 from pyssp_interface.presentation.formatters import (
     format_component_summary,
@@ -26,7 +27,6 @@ from pyssp_interface.presentation.formatters import (
     format_system_summary,
 )
 from pyssp_interface.services.project_service import SSPProjectService
-from pyssp_interface.state.diagram_layout import DiagramLayoutStore
 from pyssp_interface.state.project_state import (
     ComponentSummary,
     ConnectionSummary,
@@ -44,9 +44,7 @@ class MainWindow(QMainWindow):
         self.project_service = project_service or SSPProjectService()
         self.project: ProjectSnapshot | None = None
         self.repo_root = Path(__file__).resolve().parents[2]
-        self.diagram_layouts = DiagramLayoutStore()
-        self.pending_diagram_endpoint: tuple[str, str] | None = None
-        self.selected_diagram_connection: tuple[str, tuple[str | None, str, str | None, str]] | None = None
+        self.diagram_controller = DiagramController()
 
         self.setWindowTitle("pyssp_interface")
         self.resize(1280, 780)
@@ -374,8 +372,7 @@ class MainWindow(QMainWindow):
 
     def _load_snapshot(self, snapshot: ProjectSnapshot) -> None:
         self.project = snapshot
-        self.pending_diagram_endpoint = None
-        self.selected_diagram_connection = None
+        self.diagram_controller.reset()
         self.setWindowTitle(f"pyssp_interface - {snapshot.project_name}")
         self.project_tree.populate(snapshot)
         self._populate_variables(snapshot.fmus)
@@ -724,48 +721,27 @@ class MainWindow(QMainWindow):
         if self.project is None:
             return
 
-        self.selected_diagram_connection = None
         self.diagram_view.set_selected_connection(None)
-        endpoint = (owner_path, connector_name)
         system_path = self.diagram_view.current_system_path
-        if system_path is None:
-            return
-
-        if self.pending_diagram_endpoint == endpoint:
-            self.pending_diagram_endpoint = None
-            self.diagram_view.set_selected_endpoint(None)
-            self.statusBar().showMessage("Cleared pending diagram endpoint")
-            return
-
-        if self.pending_diagram_endpoint is None:
-            self.pending_diagram_endpoint = endpoint
-            self.diagram_view.set_selected_endpoint(endpoint)
-            self.statusBar().showMessage(
-                f"Selected start endpoint {owner_path}::{connector_name}. Select an end endpoint."
-            )
-            return
-
-        start_owner_path, start_connector = self.pending_diagram_endpoint
         try:
-            snapshot = self._create_connection_from_endpoints(
-                start_owner_path=start_owner_path,
-                start_connector=start_connector,
-                end_owner_path=owner_path,
-                end_connector=connector_name,
+            result = self.diagram_controller.activate_endpoint(
+                owner_path=owner_path,
+                connector_name=connector_name,
                 system_path=system_path,
+                create_connection=self._create_connection_from_endpoints,
             )
         except Exception as exc:
             QMessageBox.critical(self, "Add connection failed", str(exc))
-            self.diagram_view.set_selected_endpoint(self.pending_diagram_endpoint)
+            self.diagram_view.set_selected_endpoint(self.diagram_controller.pending_endpoint)
             return
 
-        self.pending_diagram_endpoint = None
-        self._load_snapshot(snapshot)
-        selected_system = self._find_structure_node(system_path)
-        self._render_diagram(selected_system, highlight_path=system_path)
-        self.statusBar().showMessage(
-            f"Added connection {start_owner_path}::{start_connector} -> {owner_path}::{connector_name}"
-        )
+        self.diagram_view.set_selected_endpoint(self.diagram_controller.pending_endpoint)
+        if result.message is not None:
+            self.statusBar().showMessage(result.message)
+        if result.snapshot is not None and system_path is not None:
+            self._load_snapshot(result.snapshot)
+            selected_system = self._find_structure_node(system_path)
+            self._render_diagram(selected_system, highlight_path=system_path)
 
     def _handle_diagram_connection_activation(
         self,
@@ -775,16 +751,18 @@ class MainWindow(QMainWindow):
         connection = self._find_connection(owner_path, key)
         if connection is None:
             return
-        self.pending_diagram_endpoint = None
+        message = self.diagram_controller.activate_connection(
+            owner_path=owner_path,
+            key=key,
+            connection=connection,
+        )
         self.diagram_view.set_selected_endpoint(None)
-        self.selected_diagram_connection = (owner_path, key)
-        self.diagram_view.set_selected_connection(self.selected_diagram_connection)
+        self.diagram_view.set_selected_connection(self.diagram_controller.selected_connection)
         self.details_panel.setPlainText(format_connection_summary(connection))
         self._set_table_rows(self.connection_table, [self._connection_row(connection)])
         self.explorer_tabs.setCurrentWidget(self.diagram_view)
-        self.statusBar().showMessage(
-            f"Selected connection {owner_path}: {connection.start_connector} -> {connection.end_connector}"
-        )
+        if message is not None:
+            self.statusBar().showMessage(message)
 
     def _update_diagram_layout(
         self,
@@ -793,7 +771,12 @@ class MainWindow(QMainWindow):
         x: float,
         y: float,
     ) -> None:
-        self.diagram_layouts.update_block_position(system_path, block_path, x=x, y=y)
+        self.diagram_controller.update_block_position(
+            system_path=system_path,
+            block_path=block_path,
+            x=x,
+            y=y,
+        )
         current_node = self._find_structure_node(system_path)
         if current_node is None:
             return
@@ -805,50 +788,16 @@ class MainWindow(QMainWindow):
         *,
         highlight_path: str | None,
     ) -> None:
-        if (
-            self.pending_diagram_endpoint is not None
-            and not self._endpoint_in_scope(node, self.pending_diagram_endpoint)
-        ):
-            self.pending_diagram_endpoint = None
-        if (
-            self.selected_diagram_connection is not None
-            and not self._connection_in_scope(node, self.selected_diagram_connection)
-        ):
-            self.selected_diagram_connection = None
-        self.diagram_view.render_system(
-            node,
-            layout=self.diagram_layouts.layout_for(node),
-        )
-        self.diagram_view.set_highlighted_path(highlight_path)
-        self.diagram_view.set_selected_endpoint(self.pending_diagram_endpoint)
-        self.diagram_view.set_selected_connection(self.selected_diagram_connection)
+        render_state = self.diagram_controller.render_state(node, highlighted_path=highlight_path)
+        self.diagram_view.render_system(node, layout=render_state.layout)
+        self.diagram_view.set_highlighted_path(render_state.highlighted_path)
+        self.diagram_view.set_selected_endpoint(render_state.selected_endpoint)
+        self.diagram_view.set_selected_connection(render_state.selected_connection)
 
     def _current_diagram_highlight_path(self) -> str | None:
         return self.project_tree.current_payload().get("path") or self.project_tree.current_payload().get(
             "owner_path"
         )
-
-    @staticmethod
-    def _endpoint_in_scope(
-        node: StructureNode | None,
-        endpoint: tuple[str, str],
-    ) -> bool:
-        if node is None or node.node_kind != "system":
-            return False
-        owner_path, _ = endpoint
-        if owner_path == node.path:
-            return True
-        return any(child.path == owner_path for child in node.children)
-
-    @staticmethod
-    def _connection_in_scope(
-        node: StructureNode | None,
-        connection: tuple[str, tuple[str | None, str, str | None, str]],
-    ) -> bool:
-        if node is None or node.node_kind != "system":
-            return False
-        owner_path, _ = connection
-        return owner_path == node.path
 
     def _root_system_path(self) -> str | None:
         if self.project is None or self.project.structure_tree is None:
@@ -901,8 +850,8 @@ class MainWindow(QMainWindow):
         )
 
     def _selected_connection_for_removal(self) -> ConnectionSummary | None:
-        if self.selected_diagram_connection is not None:
-            owner_path, key = self.selected_diagram_connection
+        if self.diagram_controller.selected_connection is not None:
+            owner_path, key = self.diagram_controller.selected_connection
             return self._find_connection(owner_path, key)
 
         payload = self.project_tree.current_payload()
