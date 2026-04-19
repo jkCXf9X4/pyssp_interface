@@ -36,9 +36,9 @@ This means the GUI should be implemented as an application layer on top of the l
 
 ## Current Implementation Status
 
-The repository is now past the original bootstrap stage.
+The repository is now past the original bootstrap stage and has a working vertical slice for SSP inspection and basic authoring.
 
-Implemented today:
+### Completed
 
 - packaged `src/` application with a repo-local `venv` workflow
 - `SSPProjectService` for open/create/import/edit operations
@@ -46,12 +46,59 @@ Implemented today:
 - nested tree view tied to actual SSD ownership paths
 - subsystem-scoped diagram rendering
 - path-based nested authoring APIs for connectors, components, and connections
+- diagram-side endpoint selection and connection creation
+- diagram interaction/controller extraction out of `MainWindow`
+- focused unit coverage for project service, diagram layout, and diagram controller behavior
 
-Still in progress:
+### In Progress
 
-- diagram-first editing workflows
+- diagram-first editing workflows beyond connection authoring
 - persistent layout state per system scope
-- further modularization of orchestration logic out of `MainWindow`
+- broader nested-authoring test coverage beyond the current service/controller focus
+- tabular editors for variable tables, composition tables, SSV, and SSM add/update/delete workflows
+
+### Not Started
+
+- parameter binding editing beyond the existing structural placeholders
+- resource management actions such as rename, duplicate, and remove
+- extended SSP asset editors for `.ssb` and SRMD content
+- FMU authoring helpers built on `pyfmu_csv`
+
+## Tracking Snapshot
+
+Use this section as the canonical high-level tracker.
+
+### Delivery Phases Status
+
+- Phase 0: complete
+- Phase 1: complete
+- Phase 2: mostly complete
+  Remaining gaps: explicit save/save-as workflow, dirty-state tracking, and stronger project lifecycle ergonomics.
+- Phase 3: in progress
+  Remaining gaps: visual deletion/movement flows beyond current basics, layout persistence, and deeper diagram-first editing.
+- Phase 4: not started
+- Phase 5: not started
+
+### Workstream Status
+
+- Workstream 1: in progress
+  Implemented: create/open existing project and archive-backed edits.
+  Remaining: save/save-as UX, dirty-state tracking, and temp/project state management.
+- Workstream 2: mostly complete
+  Implemented: FMU import, FMU inspection, variable display, and component generation from FMU metadata.
+  Remaining: richer FMU presentation grouping and polish, not foundational capability.
+- Workstream 3: in progress
+  Implemented: nested system editing for components, connectors, and connections.
+  Remaining: remove/edit component flows, tabular editors for composition and related variable data, and basic parameter binding workflows.
+- Workstream 4: in progress
+  Implemented: scoped diagram rendering, synchronized selection, connector picking, connection creation, and in-memory block placement.
+  Remaining: persistent layout state, broader visual edit/delete flows, and more complete diagram-first authoring.
+- Workstream 5: in progress
+  Implemented: validation messages surfaced from SSD checks in the UI.
+  Remaining: stronger diagnostics, earlier invalid-connection feedback, and better object-linked error reporting.
+- Workstream 6: in progress
+  Remaining: tabular editors for SSV and SSM item CRUD, then broader `.ssb` and SRMD support.
+- Workstream 7: not started
 
 ## Proposed Product Scope
 
@@ -167,12 +214,10 @@ docs/
 src/
   pyssp_interface/
     app.py
+    diagram_controller.py
     main_window.py
     state/
     services/
-    models/
-    views/
-    dialogs/
     widgets/
 tests/
   unit/
@@ -182,9 +227,9 @@ tests/
 Notes:
 
 - `services/` owns interactions with `pyssp_standard` and `pyfmu_csv`
-- `models/` holds Qt item/table/tree models
-- `views/` and `widgets/` hold presentation code
+- `widgets/` holds focused Qt widgets such as the project tree
 - `state/` holds application/session state objects
+- controller-style modules can sit at the package root while the UI is still small
 
 ## Functional Workstreams
 
@@ -192,48 +237,51 @@ Implement the project through a small number of stable workstreams.
 
 ### Workstream 1: Project Lifecycle
 
-- create a new empty SSP project
-- open an existing SSP
-- save and save as
-- detect dirty state
-- manage unpacked temp/project state safely
+- done: create a new empty SSP project
+- done: open an existing SSP
+- remaining: save and save as
+- remaining: detect dirty state
+- remaining: manage unpacked temp/project state safely
 
 ### Workstream 2: FMU Import and Inspection
 
-- import FMUs into `resources/`
-- inspect `modelDescription.xml` via `pyssp_standard.FMU`
-- present variables grouped by causality and variability
-- generate suggested SSP connectors/components from FMU metadata
+- done: import FMUs into `resources/`
+- done: inspect `modelDescription.xml` via `pyssp_standard.FMU`
+- done: present FMU variables in the UI
+- done: generate suggested SSP connectors/components from FMU metadata
+- remaining: improve FMU variable grouping/presentation polish
 
 ### Workstream 3: System Structure Editing
 
-- edit `SystemStructure.ssd` at any system depth
-- add/remove components
-- create/edit connectors
-- create/edit/delete connections
-- support simple parameter bindings
+- done: edit `SystemStructure.ssd` at any system depth
+- done: add components
+- remaining: remove components
+- done: create connectors
+- remaining: edit/delete connectors
+- done: create/delete connections
+- remaining: tabular editors for add/edit/delete composition and variable rows tied to components, connectors, and connections
+- remaining: support simple parameter bindings
 
 ### Workstream 4: Block Diagram Editing
 
-- provide a canvas-based view of the current SSP system structure
-- render components, system connectors, and directed connections
-- support selection and synchronized inspection with the details pane
-- support create/move/delete actions for components and connections
-- keep the visual editor backed by the same domain operations as the form/table editors
-- store layout metadata in annotations or a project-local representation until a stable persistence format is chosen
+- done: provide a canvas-based view of the current SSP system structure
+- done: render components, system connectors, and directed connections
+- done: support selection and synchronized inspection with the details pane
+- in progress: support create/move/delete actions for components and connections
+- done: keep the visual editor backed by the same domain operations as the form/table editors
+- remaining: store layout metadata in annotations or another persistent representation
 
 ### Workstream 5: Validation and Diagnostics
 
-- surface schema/compliance errors
-- detect invalid connection patterns before save where possible
-- show user-facing messages with references to the affected object
+- done: surface schema/compliance errors
+- remaining: detect invalid connection patterns before save where possible
+- remaining: show user-facing messages with references to the affected object
 
 ### Workstream 6: Extended Asset Editing
 
-After the MVP:
+After the MVP unless pulled forward by table-editing work:
 
-- SSV editor
-- SSM editor
+- in progress: tabular editors for SSV and SSM viewing plus add/modify/remove item workflows
 - SSB browser/editor
 - SRMD workflow support
 
@@ -265,6 +313,8 @@ Exit criteria:
 - app launches locally
 - project contains a repeatable development workflow
 
+Status: complete
+
 ### Phase 1: Read-Only Explorer
 
 Goal: make existing SSPs and FMUs inspectable.
@@ -279,6 +329,8 @@ Deliverables:
 Exit criteria:
 
 - user can open an SSP and understand its contents without leaving the app
+
+Status: complete
 
 ### Phase 2: Basic SSP Authoring
 
@@ -296,6 +348,12 @@ Exit criteria:
 
 - user can create a small SSP around one or more FMUs and save it successfully
 
+Status: mostly complete
+Remaining:
+
+- explicit save/save-as workflow in the UI
+- clearer dirty-state handling
+
 ### Phase 3: Visual Editing
 
 Goal: add a usable block diagram editor on top of the stable authoring model.
@@ -312,6 +370,20 @@ Exit criteria:
 
 - user can build and adjust a small system visually without dropping back to raw structural forms for every edit
 
+Status: in progress
+Implemented so far:
+
+- block diagram canvas for systems and subsystem scopes
+- selection sync between diagram, tree, and inspector
+- visual connection creation
+- basic block movement with in-memory layout state
+
+Remaining:
+
+- persistence for diagram layout data
+- broader visual delete/edit flows
+- further reduction of `MainWindow` orchestration as the UI grows
+
 ### Phase 4: Parameter and Resource Workflows
 
 Goal: round out the minimum engineering workflow.
@@ -319,6 +391,7 @@ Goal: round out the minimum engineering workflow.
 Deliverables:
 
 - basic parameter binding editor
+- tabular editors for variable tables, composition tables, SSV, and SSM add/update/delete actions
 - resource management actions
 - duplicate/rename/remove actions where safe
 - stronger validation and better diagnostics
@@ -326,6 +399,8 @@ Deliverables:
 Exit criteria:
 
 - user can manage an SSP project without manual archive surgery
+
+Status: not started
 
 ### Phase 5: Guided Generation and Polishing
 
@@ -341,6 +416,8 @@ Deliverables:
 Exit criteria:
 
 - app is practical for regular use by non-library-developer users
+
+Status: not started
 
 ## First Implementation Slice
 
@@ -449,11 +526,12 @@ Mitigation:
 
 Recommended next implementation tasks:
 
-1. move more diagram interaction logic out of `MainWindow`
-2. add diagram-side connector selection and connection creation
-3. introduce layout state and persistence per system scope
-4. expand nested-authoring tests beyond service-level coverage
-5. deepen parameter binding and resource editing only after the diagram command path is stable
+1. introduce persistent layout state per system scope
+2. expand nested-authoring tests beyond the current service/controller coverage
+3. add visual delete/edit flows for diagram-authored connections and components
+4. add tabular editors for variable tables, composition tables, SSV, and SSM add/update/delete workflows
+5. add explicit save/save-as and dirty-state handling
+6. deepen parameter binding and resource editing only after the diagram command path is stable
 
 ## Definition of Success for the First Release
 
