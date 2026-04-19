@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from PySide6.QtCore import QPointF, QRectF, Qt, Signal
 from PySide6.QtGui import QBrush, QColor, QPainter, QPen
 from PySide6.QtWidgets import (
+    QGraphicsEllipseItem,
     QGraphicsRectItem,
     QGraphicsScene,
     QGraphicsSimpleTextItem,
@@ -40,9 +41,23 @@ class _SelectableRectItem(QGraphicsRectItem):
         super().mouseReleaseEvent(event)
 
 
+class _EndpointItem(QGraphicsEllipseItem):
+    def __init__(self, owner_path: str, connector_name: str, rect: QRectF, on_activate):
+        super().__init__(rect)
+        self.owner_path = owner_path
+        self.connector_name = connector_name
+        self._on_activate = on_activate
+        self.setCursor(Qt.PointingHandCursor)
+
+    def mousePressEvent(self, event):
+        self._on_activate(self.owner_path, self.connector_name)
+        super().mousePressEvent(event)
+
+
 class DiagramView(QGraphicsView):
     pathActivated = Signal(str)
     blockMoved = Signal(str, str, float, float)
+    endpointActivated = Signal(str, str)
 
     def __init__(self):
         super().__init__()
@@ -52,7 +67,9 @@ class DiagramView(QGraphicsView):
         self.setBackgroundBrush(QBrush(QColor("#f7f6f1")))
         self.setDragMode(QGraphicsView.ScrollHandDrag)
         self._item_by_path: dict[str, _SelectableRectItem] = {}
+        self._endpoint_items: dict[tuple[str, str], _EndpointItem] = {}
         self._highlighted_path: str | None = None
+        self._selected_endpoint: tuple[str, str] | None = None
         self._current_system_path: str | None = None
 
     def render_system(
@@ -63,6 +80,7 @@ class DiagramView(QGraphicsView):
     ) -> None:
         self._scene.clear()
         self._item_by_path.clear()
+        self._endpoint_items.clear()
         self._current_system_path = None
         if node is None:
             self._scene.addText("Select a system to view its block diagram.")
@@ -118,6 +136,7 @@ class DiagramView(QGraphicsView):
         self.setSceneRect(bounds)
         self.fitInView(bounds, Qt.KeepAspectRatio)
         self.set_highlighted_path(self._highlighted_path)
+        self.set_selected_endpoint(self._selected_endpoint)
 
     def set_highlighted_path(self, path: str | None) -> None:
         self._highlighted_path = path
@@ -126,6 +145,20 @@ class DiagramView(QGraphicsView):
                 item.setPen(QPen(QColor("#b54708"), 3))
             else:
                 item.setPen(QPen(QColor("#344054"), 1.5))
+
+    def set_selected_endpoint(self, endpoint: tuple[str, str] | None) -> None:
+        self._selected_endpoint = endpoint
+        for key, item in self._endpoint_items.items():
+            if key == endpoint:
+                item.setBrush(QBrush(QColor("#f79009")))
+                item.setPen(QPen(QColor("#b54708"), 2))
+            else:
+                item.setBrush(QBrush(QColor("#98a2b3")))
+                item.setPen(QPen(QColor("#344054"), 1))
+
+    @property
+    def current_system_path(self) -> str | None:
+        return self._current_system_path
 
     def _draw_block(self, node: StructureNode, rect: QRectF) -> None:
         if node.node_kind == "system":
@@ -163,6 +196,8 @@ class DiagramView(QGraphicsView):
         meta_item.setBrush(QBrush(QColor("#475467")))
         meta_item.setPos(12, 56)
 
+        self._draw_block_connectors(node, rect)
+
     def _emit_block_moved(self, path: str, position: QPointF) -> None:
         if self._current_system_path is None:
             return
@@ -178,12 +213,76 @@ class DiagramView(QGraphicsView):
     ) -> None:
         for index, connector in enumerate(connectors):
             y = top_y + index * 34
+            endpoint_x = x - 16 if align_right else x - 6
+            self._add_endpoint_item(
+                connector.owner_path,
+                connector.name,
+                QRectF(endpoint_x, y + 3, 10, 10),
+            )
             label = f"{connector.name} [{connector.kind}]"
             text = self._scene.addText(label)
             if align_right:
                 text.setPos(x - text.boundingRect().width(), y)
             else:
                 text.setPos(x, y)
+
+    def _draw_block_connectors(self, node: StructureNode, rect: QRectF) -> None:
+        left_connectors = [c for c in node.connectors if c.kind in {"input", "parameter"}]
+        right_connectors = [c for c in node.connectors if c.kind in {"output", "calculatedParameter"}]
+        other_connectors = [
+            c
+            for c in node.connectors
+            if c.kind not in {"input", "parameter", "output", "calculatedParameter"}
+        ]
+
+        self._draw_block_connector_column(
+            node.path,
+            left_connectors,
+            rect.left() - 6,
+            rect.top() + 12,
+            align_right=True,
+        )
+        self._draw_block_connector_column(
+            node.path,
+            right_connectors,
+            rect.right() - 4,
+            rect.top() + 12,
+            align_right=False,
+        )
+        self._draw_block_connector_column(
+            node.path,
+            other_connectors,
+            rect.left() + 12,
+            rect.bottom() - 18,
+            align_right=False,
+        )
+
+    def _draw_block_connector_column(
+        self,
+        owner_path: str,
+        connectors: list[ConnectorSummary],
+        x: float,
+        top_y: float,
+        *,
+        align_right: bool,
+    ) -> None:
+        for index, connector in enumerate(connectors[:6]):
+            y = top_y + index * 12
+            self._add_endpoint_item(owner_path, connector.name, QRectF(x, y, 8, 8))
+            label = QGraphicsSimpleTextItem(connector.name)
+            label.setBrush(QBrush(QColor("#475467")))
+            if align_right:
+                label.setPos(x - label.boundingRect().width() - 4, y - 4)
+            else:
+                label.setPos(x + 12, y - 4)
+            self._scene.addItem(label)
+
+    def _add_endpoint_item(self, owner_path: str, connector_name: str, rect: QRectF) -> None:
+        item = _EndpointItem(owner_path, connector_name, rect, self.endpointActivated.emit)
+        item.setBrush(QBrush(QColor("#98a2b3")))
+        item.setPen(QPen(QColor("#344054"), 1))
+        self._scene.addItem(item)
+        self._endpoint_items[(owner_path, connector_name)] = item
 
     def _draw_connection(
         self,
@@ -234,11 +333,18 @@ class DiagramView(QGraphicsView):
             connector = next((c for c in node.connectors if c.name == connector_name), None)
             if connector is None:
                 return None
-            y = self._system_connector_y(node, connector_name)
+            key = (node.path, connector_name)
+            endpoint_item = self._endpoint_items.get(key)
+            if endpoint_item is not None:
+                center = endpoint_item.sceneBoundingRect().center()
+                return center
             if connector.kind in {"input", "parameter"}:
+                y = self._system_connector_y(node, connector_name)
                 return QPointF(system_left_x + 110, y)
             if connector.kind in {"output", "calculatedParameter"}:
+                y = self._system_connector_y(node, connector_name)
                 return QPointF(system_right_x - 8, y)
+            y = self._system_connector_y(node, connector_name)
             return QPointF(system_left_x + 110 if is_source else system_right_x - 8, y)
 
         child = next((child for child in node.children if child.name == owner_element), None)
@@ -248,6 +354,10 @@ class DiagramView(QGraphicsView):
         geometry = block_geometries.get(child.path)
         if geometry is None:
             return None
+
+        endpoint_item = self._endpoint_items.get((child.path, connector_name))
+        if endpoint_item is not None:
+            return endpoint_item.sceneBoundingRect().center()
 
         connector_index = next(
             (index for index, connector in enumerate(child.connectors) if connector.name == connector_name),

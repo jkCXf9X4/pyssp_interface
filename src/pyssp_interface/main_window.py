@@ -45,6 +45,7 @@ class MainWindow(QMainWindow):
         self.project: ProjectSnapshot | None = None
         self.repo_root = Path(__file__).resolve().parents[2]
         self.diagram_layouts = DiagramLayoutStore()
+        self.pending_diagram_endpoint: tuple[str, str] | None = None
 
         self.setWindowTitle("pyssp_interface")
         self.resize(1280, 780)
@@ -59,6 +60,7 @@ class MainWindow(QMainWindow):
         self.diagram_view = DiagramView()
         self.diagram_view.pathActivated.connect(self._select_tree_path_from_diagram)
         self.diagram_view.blockMoved.connect(self._update_diagram_layout)
+        self.diagram_view.endpointActivated.connect(self._handle_diagram_endpoint_activation)
 
         self.variable_table = self._create_table(
             ["FMU", "Name", "Causality", "Variability", "Type", "Description"]
@@ -316,15 +318,12 @@ class MainWindow(QMainWindow):
             return
 
         try:
-            snapshot = self.project_service.add_connection(
-                self.project.project_path,
-                system_path=self._current_system_scope_path(),
+            snapshot = self._create_connection_from_endpoints(
                 start_owner_path=start_owner_path,
-                start_element=None,
                 start_connector=start_connector,
                 end_owner_path=end_owner_path,
-                end_element=None,
                 end_connector=end_connector,
+                system_path=self._current_system_scope_path(),
             )
         except Exception as exc:
             QMessageBox.critical(self, "Add connection failed", str(exc))
@@ -378,6 +377,7 @@ class MainWindow(QMainWindow):
 
     def _load_snapshot(self, snapshot: ProjectSnapshot) -> None:
         self.project = snapshot
+        self.pending_diagram_endpoint = None
         self.setWindowTitle(f"pyssp_interface - {snapshot.project_name}")
         self.project_tree.populate(snapshot)
         self._populate_variables(snapshot.fmus)
@@ -722,6 +722,51 @@ class MainWindow(QMainWindow):
         self.project_tree.setCurrentItem(item)
         self.explorer_tabs.setCurrentWidget(self.diagram_view)
 
+    def _handle_diagram_endpoint_activation(self, owner_path: str, connector_name: str) -> None:
+        if self.project is None:
+            return
+
+        endpoint = (owner_path, connector_name)
+        system_path = self.diagram_view.current_system_path
+        if system_path is None:
+            return
+
+        if self.pending_diagram_endpoint == endpoint:
+            self.pending_diagram_endpoint = None
+            self.diagram_view.set_selected_endpoint(None)
+            self.statusBar().showMessage("Cleared pending diagram endpoint")
+            return
+
+        if self.pending_diagram_endpoint is None:
+            self.pending_diagram_endpoint = endpoint
+            self.diagram_view.set_selected_endpoint(endpoint)
+            self.statusBar().showMessage(
+                f"Selected start endpoint {owner_path}::{connector_name}. Select an end endpoint."
+            )
+            return
+
+        start_owner_path, start_connector = self.pending_diagram_endpoint
+        try:
+            snapshot = self._create_connection_from_endpoints(
+                start_owner_path=start_owner_path,
+                start_connector=start_connector,
+                end_owner_path=owner_path,
+                end_connector=connector_name,
+                system_path=system_path,
+            )
+        except Exception as exc:
+            QMessageBox.critical(self, "Add connection failed", str(exc))
+            self.diagram_view.set_selected_endpoint(self.pending_diagram_endpoint)
+            return
+
+        self.pending_diagram_endpoint = None
+        self._load_snapshot(snapshot)
+        selected_system = self._find_structure_node(system_path)
+        self._render_diagram(selected_system, highlight_path=system_path)
+        self.statusBar().showMessage(
+            f"Added connection {start_owner_path}::{start_connector} -> {owner_path}::{connector_name}"
+        )
+
     def _update_diagram_layout(
         self,
         system_path: str,
@@ -741,16 +786,34 @@ class MainWindow(QMainWindow):
         *,
         highlight_path: str | None,
     ) -> None:
+        if (
+            self.pending_diagram_endpoint is not None
+            and not self._endpoint_in_scope(node, self.pending_diagram_endpoint)
+        ):
+            self.pending_diagram_endpoint = None
         self.diagram_view.render_system(
             node,
             layout=self.diagram_layouts.layout_for(node),
         )
         self.diagram_view.set_highlighted_path(highlight_path)
+        self.diagram_view.set_selected_endpoint(self.pending_diagram_endpoint)
 
     def _current_diagram_highlight_path(self) -> str | None:
         return self.project_tree.current_payload().get("path") or self.project_tree.current_payload().get(
             "owner_path"
         )
+
+    @staticmethod
+    def _endpoint_in_scope(
+        node: StructureNode | None,
+        endpoint: tuple[str, str],
+    ) -> bool:
+        if node is None or node.node_kind != "system":
+            return False
+        owner_path, _ = endpoint
+        if owner_path == node.path:
+            return True
+        return any(child.path == owner_path for child in node.children)
 
     def _root_system_path(self) -> str | None:
         if self.project is None or self.project.structure_tree is None:
@@ -777,6 +840,30 @@ class MainWindow(QMainWindow):
         if local_element is None:
             return owner_system_path
         return f"{owner_system_path}/{local_element}"
+
+    def _create_connection_from_endpoints(
+        self,
+        *,
+        start_owner_path: str,
+        start_connector: str,
+        end_owner_path: str,
+        end_connector: str,
+        system_path: str | None,
+    ) -> ProjectSnapshot:
+        if self.project is None:
+            raise ValueError("No project is open")
+        if (start_owner_path, start_connector) == (end_owner_path, end_connector):
+            raise ValueError("Start and end endpoints must be different")
+        return self.project_service.add_connection(
+            self.project.project_path,
+            system_path=system_path,
+            start_owner_path=start_owner_path,
+            start_element=None,
+            start_connector=start_connector,
+            end_owner_path=end_owner_path,
+            end_element=None,
+            end_connector=end_connector,
+        )
 
     @staticmethod
     def _component_row(component: ComponentSummary) -> list[str]:
