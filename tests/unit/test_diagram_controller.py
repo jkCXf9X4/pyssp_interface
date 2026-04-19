@@ -67,6 +67,37 @@ def test_activate_endpoint_tracks_selection_and_creates_connection():
     assert created == [("system/A", "y", "system/B", "u", "system")]
 
 
+def test_activate_endpoint_same_endpoint_clears_pending_state():
+    controller = DiagramController()
+    controller.pending_endpoint = ("system/A", "y")
+
+    result = controller.activate_endpoint(
+        owner_path="system/A",
+        connector_name="y",
+        system_path="system",
+        create_connection=lambda **kwargs: _make_snapshot(),
+    )
+
+    assert result.status == "cleared"
+    assert controller.pending_endpoint is None
+
+
+def test_activate_endpoint_without_system_scope_is_ignored():
+    controller = DiagramController()
+    controller.selected_connection = ("system", ("A", "y", "B", "u"))
+
+    result = controller.activate_endpoint(
+        owner_path="system/A",
+        connector_name="y",
+        system_path=None,
+        create_connection=lambda **kwargs: _make_snapshot(),
+    )
+
+    assert result.status == "ignored"
+    assert controller.pending_endpoint is None
+    assert controller.selected_connection is None
+
+
 def test_activate_connection_clears_pending_endpoint_and_selects_connection():
     controller = DiagramController()
     controller.pending_endpoint = ("system/A", "y")
@@ -100,3 +131,25 @@ def test_render_state_clears_selections_outside_current_scope():
     assert render_state.selected_endpoint is None
     assert render_state.selected_connection is None
     assert render_state.highlighted_path == "system"
+
+
+def test_reset_loads_persisted_layout_data():
+    controller = DiagramController()
+    controller.reset({"system": {"system/A": (420.0, 260.0, 280.0, 96.0)}})
+
+    render_state = controller.render_state(_make_system(), highlighted_path="system")
+
+    assert render_state.layout is not None
+    assert render_state.layout.blocks["system/A"].x == 420.0
+    assert render_state.layout.blocks["system/A"].y == 260.0
+
+
+def test_render_state_preserves_in_scope_selections():
+    controller = DiagramController()
+    controller.pending_endpoint = ("system/A", "y")
+    controller.selected_connection = ("system", ("A", "y", "B", "u"))
+
+    render_state = controller.render_state(_make_system(), highlighted_path="system/A")
+
+    assert render_state.selected_endpoint == ("system/A", "y")
+    assert render_state.selected_connection == ("system", ("A", "y", "B", "u"))

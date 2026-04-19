@@ -3,7 +3,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from pyssp_interface.state.diagram_layout import DiagramLayoutStore, SystemLayout
-from pyssp_interface.state.project_state import ConnectionSummary, ProjectSnapshot, StructureNode
+from pyssp_interface.state.project_state import (
+    ConnectionSummary,
+    DiagramLayoutData,
+    ProjectSnapshot,
+    StructureNode,
+)
 
 ConnectionKey = tuple[str | None, str, str | None, str]
 DiagramEndpoint = tuple[str, str]
@@ -31,9 +36,10 @@ class DiagramController:
         self.pending_endpoint: DiagramEndpoint | None = None
         self.selected_connection: DiagramSelection | None = None
 
-    def reset(self) -> None:
+    def reset(self, layouts: DiagramLayoutData | None = None) -> None:
         self.pending_endpoint = None
         self.selected_connection = None
+        self._layout_store.load(layouts or {})
 
     def activate_endpoint(
         self,

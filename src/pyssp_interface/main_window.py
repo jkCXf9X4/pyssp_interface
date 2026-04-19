@@ -372,7 +372,7 @@ class MainWindow(QMainWindow):
 
     def _load_snapshot(self, snapshot: ProjectSnapshot) -> None:
         self.project = snapshot
-        self.diagram_controller.reset()
+        self.diagram_controller.reset(snapshot.diagram_layouts)
         self.setWindowTitle(f"pyssp_interface - {snapshot.project_name}")
         self.project_tree.populate(snapshot)
         self._populate_variables(snapshot.fmus)
@@ -777,6 +777,17 @@ class MainWindow(QMainWindow):
             x=x,
             y=y,
         )
+        if self.project is not None:
+            try:
+                self.project_service.update_block_layout(
+                    self.project.project_path,
+                    system_path=system_path,
+                    block_path=block_path,
+                    x=x,
+                    y=y,
+                )
+            except Exception as exc:
+                QMessageBox.critical(self, "Persist layout failed", str(exc))
         current_node = self._find_structure_node(system_path)
         if current_node is None:
             return

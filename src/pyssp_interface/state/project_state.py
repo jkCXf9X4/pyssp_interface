@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
 
+DiagramLayoutData = dict[str, dict[str, tuple[float, float, float, float]]]
+
 
 @dataclass(slots=True)
 class ResourceSummary:
@@ -80,4 +82,5 @@ class ProjectSnapshot:
     connectors: list[ConnectorSummary] = field(default_factory=list)
     connections: list[ConnectionSummary] = field(default_factory=list)
     validation_messages: list[str] = field(default_factory=list)
+    diagram_layouts: DiagramLayoutData = field(default_factory=dict)
     dirty: bool = False

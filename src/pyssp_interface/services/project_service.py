@@ -17,6 +17,7 @@ from pyssp_interface.state.project_state import (
 ensure_vendor_paths()
 
 from pyssp_standard.common_content_ssc import (
+    Annotation,
     TypeBoolean,
     TypeEnumeration,
     TypeInteger,
@@ -26,10 +27,14 @@ from pyssp_standard.common_content_ssc import (
 from pyssp_standard.fmu import FMU
 from pyssp_standard.ssd import Component, Connection, Connector, SSD, System
 from pyssp_standard.ssp import SSP
+from lxml import etree as ET
+from lxml.etree import QName
 
 
 class SSPProjectService:
     """Application-facing SSP operations built on top of pyssp_standard."""
+
+    DIAGRAM_LAYOUT_ANNOTATION_TYPE = "pyssp_interface.diagram_layout"
 
     def create_project(self, project_path: Path | str) -> ProjectSnapshot:
         project_path = Path(project_path)
@@ -56,6 +61,7 @@ class SSPProjectService:
         validation_messages: list[str] = []
         system_name: str | None = None
         structure_tree: StructureNode | None = None
+        diagram_layouts: dict[str, dict[str, tuple[float, float, float, float]]] = {}
 
         with SSP(project_path, mode="r") as ssp:
             ssd = ssp.system_structure
@@ -68,6 +74,10 @@ class SSPProjectService:
             if ssd.system is not None:
                 system_name = ssd.system.name
                 structure_tree = self._build_structure_tree(ssd.system, path=ssd.system.name or "system")
+                diagram_layouts = self._collect_diagram_layouts(
+                    ssd.system,
+                    path=ssd.system.name or "system",
+                )
                 components = self._flatten_components(structure_tree)
                 connectors = self._flatten_connectors(structure_tree)
                 connections = self._flatten_connections(structure_tree)
@@ -87,6 +97,7 @@ class SSPProjectService:
             connectors=connectors,
             connections=connections,
             validation_messages=validation_messages,
+            diagram_layouts=diagram_layouts,
         )
 
     def import_fmu(
@@ -219,6 +230,8 @@ class SSPProjectService:
                     end_owner_path,
                     end_element,
                 )
+                self._owner_path_to_local_element(target_system_path, normalized_start_owner)
+                self._owner_path_to_local_element(target_system_path, normalized_end_owner)
                 self._validate_connection_endpoints(
                     target_system,
                     target_system_path,
@@ -269,6 +282,8 @@ class SSPProjectService:
                     end_owner_path,
                     end_element,
                 )
+                self._owner_path_to_local_element(target_system_path, normalized_start_owner)
+                self._owner_path_to_local_element(target_system_path, normalized_end_owner)
                 connection = Connection(
                     start_element=self._owner_path_to_local_element(target_system_path, normalized_start_owner),
                     start_connector=start_connector,
@@ -302,6 +317,37 @@ class SSPProjectService:
             fmi_version=model_description.fmi_version,
             variables=variables,
         )
+
+    def update_block_layout(
+        self,
+        project_path: Path | str,
+        *,
+        system_path: str,
+        block_path: str,
+        x: float,
+        y: float,
+        width: float = 240.0,
+        height: float = 84.0,
+    ) -> None:
+        project_path = Path(project_path)
+
+        with SSP(project_path, mode="a") as ssp:
+            with ssp.system_structure as ssd:
+                if ssd.system is None:
+                    raise ValueError("Project has no system structure")
+
+                _, target_system = self._resolve_system_path_and_object(ssd, system_path)
+                direct_child_paths = {
+                    f"{system_path}/{getattr(element, 'name', '<unnamed>')}"
+                    for element in target_system.elements
+                    if hasattr(element, "name") and getattr(element, "name", None) is not None
+                }
+                if block_path not in direct_child_paths:
+                    raise ValueError(f"Block {block_path} is not a direct child of system {system_path}")
+
+                layouts = self._read_system_layout_annotation(target_system)
+                layouts[block_path] = (x, y, width, height)
+                self._write_system_layout_annotation(target_system, layouts)
 
     def _load_fmus(self, ssp: SSP) -> list[FMUSummary]:
         summaries: list[FMUSummary] = []
@@ -338,6 +384,89 @@ class SSPProjectService:
         except Exception as exc:
             return [f"SSD compliance check failed: {exc}"]
         return []
+
+    def _collect_diagram_layouts(
+        self,
+        system: System,
+        *,
+        path: str,
+    ) -> dict[str, dict[str, tuple[float, float, float, float]]]:
+        layouts: dict[str, dict[str, tuple[float, float, float, float]]] = {}
+        system_layout = self._read_system_layout_annotation(system)
+        if system_layout:
+            layouts[path] = system_layout
+        for element in system.elements:
+            if isinstance(element, System):
+                child_path = f"{path}/{element.name}"
+                layouts.update(self._collect_diagram_layouts(element, path=child_path))
+        return layouts
+
+    def _read_system_layout_annotation(
+        self,
+        system: System,
+    ) -> dict[str, tuple[float, float, float, float]]:
+        annotation = self._find_layout_annotation(system)
+        if annotation is None:
+            return {}
+
+        layouts: dict[str, tuple[float, float, float, float]] = {}
+        for block in annotation.findall("block"):
+            block_path = block.get("path")
+            if not block_path:
+                continue
+            layouts[block_path] = (
+                self._float_attr(block, "x", default=280.0),
+                self._float_attr(block, "y", default=120.0),
+                self._float_attr(block, "width", default=240.0),
+                self._float_attr(block, "height", default=84.0),
+            )
+        return layouts
+
+    def _write_system_layout_annotation(
+        self,
+        system: System,
+        layouts: dict[str, tuple[float, float, float, float]],
+    ) -> None:
+        annotations_root = system.annotations.root
+        for annotation in list(annotations_root):
+            if annotation.get("type") == self.DIAGRAM_LAYOUT_ANNOTATION_TYPE:
+                annotations_root.remove(annotation)
+
+        annotation_element = ET.Element(
+            QName(Annotation.namespaces["ssc"], "Annotation"),
+            attrib={"type": self.DIAGRAM_LAYOUT_ANNOTATION_TYPE},
+        )
+        for block_path, geometry in sorted(layouts.items()):
+            x, y, width, height = geometry
+            annotation_element.append(
+                ET.Element(
+                    "block",
+                    attrib={
+                        "path": block_path,
+                        "x": str(x),
+                        "y": str(y),
+                        "width": str(width),
+                        "height": str(height),
+                    },
+                )
+            )
+        system.annotations.add_annotation(Annotation(annotation_element))
+
+    def _find_layout_annotation(self, system: System):
+        for annotation in system.annotations.root:
+            if annotation.get("type") == self.DIAGRAM_LAYOUT_ANNOTATION_TYPE:
+                return annotation
+        return None
+
+    @staticmethod
+    def _float_attr(element, name: str, *, default: float) -> float:
+        value = element.get(name)
+        if value is None:
+            return default
+        try:
+            return float(value)
+        except ValueError:
+            return default
 
     def _validate_connection_endpoints(
         self,

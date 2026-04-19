@@ -37,3 +37,25 @@ def test_layout_store_seeds_updates_and_drops_blocks():
     )
     layout = store.layout_for(updated_node)
     assert set(layout.blocks) == {"root/B"}
+
+
+def test_layout_store_loads_persisted_layout_data():
+    node = StructureNode(
+        path="root",
+        node_kind="system",
+        name="root",
+        children=[
+            StructureNode(path="root/A", node_kind="component", name="A"),
+        ],
+    )
+
+    store = DiagramLayoutStore()
+    store.load({"root": {"root/A": (420.0, 260.0, 280.0, 96.0)}})
+
+    layout = store.layout_for(node)
+
+    assert layout is not None
+    assert layout.blocks["root/A"].x == 420.0
+    assert layout.blocks["root/A"].y == 260.0
+    assert layout.blocks["root/A"].width == 280.0
+    assert layout.blocks["root/A"].height == 96.0

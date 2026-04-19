@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from pyssp_interface.state.project_state import StructureNode
+from pyssp_interface.state.project_state import DiagramLayoutData, StructureNode
 
 
 @dataclass(slots=True)
@@ -23,6 +23,24 @@ class SystemLayout:
 class DiagramLayoutStore:
     def __init__(self):
         self._layouts: dict[str, SystemLayout] = {}
+
+    def load(self, layouts: DiagramLayoutData) -> None:
+        self._layouts = {
+            system_path: SystemLayout(
+                system_path=system_path,
+                blocks={
+                    block_path: BlockLayout(
+                        path=block_path,
+                        x=geometry[0],
+                        y=geometry[1],
+                        width=geometry[2],
+                        height=geometry[3],
+                    )
+                    for block_path, geometry in blocks.items()
+                },
+            )
+            for system_path, blocks in layouts.items()
+        }
 
     def layout_for(self, node: StructureNode | None) -> SystemLayout | None:
         if node is None or node.node_kind != "system":

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 import zipfile
+import pytest
 
 from pyssp_interface._vendor import ensure_vendor_paths
 from pyssp_interface.services.project_service import SSPProjectService
@@ -156,6 +157,37 @@ def test_add_system_connector_and_connection_round_trip(tmp_path):
     )
 
 
+def test_add_connection_rejects_duplicates(tmp_path):
+    project_path = tmp_path / "duplicate-connection-demo.ssp"
+    service = SSPProjectService()
+
+    service.create_project(project_path)
+    service.add_system_connector(project_path, name="driver_signal", kind="output", type_name="Real")
+    service.add_system_connector(project_path, name="controller_input", kind="input", type_name="Real")
+    service.add_connection(
+        project_path,
+        system_path="system",
+        start_owner_path="system",
+        start_element=None,
+        start_connector="driver_signal",
+        end_owner_path="system",
+        end_element=None,
+        end_connector="controller_input",
+    )
+
+    with pytest.raises(ValueError, match="Connection already exists"):
+        service.add_connection(
+            project_path,
+            system_path="system",
+            start_owner_path="system",
+            start_element=None,
+            start_connector="driver_signal",
+            end_owner_path="system",
+            end_element=None,
+            end_connector="controller_input",
+        )
+
+
 def test_nested_authoring_targets_selected_subsystem(tmp_path):
     project_path = tmp_path / "nested-demo.ssp"
     service = SSPProjectService()
@@ -204,6 +236,140 @@ def test_nested_authoring_targets_selected_subsystem(tmp_path):
         and connection.end_connector == "U"
         for connection in snapshot.connections
     )
+
+
+def test_add_connection_rejects_endpoints_outside_selected_system_scope(tmp_path):
+    project_path = tmp_path / "invalid-nested-connection-demo.ssp"
+    service = SSPProjectService()
+
+    service.create_project(project_path)
+    with SSP(project_path, mode="a") as ssp:
+        with ssp.system_structure as ssd:
+            nested = System(None, "SuT")
+            component = Component(None)
+            component.name = "emachine_model"
+            component.connectors.append(Connector(None, "U", "input"))
+            nested.elements.append(component)
+            ssd.system.elements.append(nested)
+
+    service.add_system_connector(
+        project_path,
+        system_path="system/SuT",
+        name="nested_cmd",
+        kind="input",
+        type_name="Real",
+    )
+
+    with pytest.raises(ValueError, match="is not inside system system/SuT"):
+        service.add_connection(
+            project_path,
+            system_path="system/SuT",
+            start_owner_path="system",
+            start_element=None,
+            start_connector="nested_cmd",
+            end_owner_path="system/SuT/emachine_model",
+            end_element=None,
+            end_connector="U",
+        )
+
+
+def test_update_block_layout_persists_per_system_scope(tmp_path):
+    project_path = tmp_path / "layout-demo.ssp"
+    service = SSPProjectService()
+
+    service.create_project(project_path)
+    with SSP(project_path, mode="a") as ssp:
+        with ssp.system_structure as ssd:
+            root_component = Component(None)
+            root_component.name = "root_block"
+            ssd.system.elements.append(root_component)
+
+            nested = System(None, "SuT")
+            nested_component = Component(None)
+            nested_component.name = "nested_block"
+            nested.elements.append(nested_component)
+            ssd.system.elements.append(nested)
+
+    service.update_block_layout(
+        project_path,
+        system_path="system",
+        block_path="system/root_block",
+        x=420.0,
+        y=260.0,
+    )
+    service.update_block_layout(
+        project_path,
+        system_path="system/SuT",
+        block_path="system/SuT/nested_block",
+        x=560.0,
+        y=310.0,
+    )
+
+    snapshot = service.open_project(project_path)
+
+    assert snapshot.diagram_layouts["system"]["system/root_block"] == (420.0, 260.0, 240.0, 84.0)
+    assert snapshot.diagram_layouts["system/SuT"]["system/SuT/nested_block"] == (
+        560.0,
+        310.0,
+        240.0,
+        84.0,
+    )
+
+
+def test_update_block_layout_overwrites_existing_geometry(tmp_path):
+    project_path = tmp_path / "layout-overwrite-demo.ssp"
+    service = SSPProjectService()
+
+    service.create_project(project_path)
+    with SSP(project_path, mode="a") as ssp:
+        with ssp.system_structure as ssd:
+            component = Component(None)
+            component.name = "root_block"
+            ssd.system.elements.append(component)
+
+    service.update_block_layout(
+        project_path,
+        system_path="system",
+        block_path="system/root_block",
+        x=420.0,
+        y=260.0,
+    )
+    service.update_block_layout(
+        project_path,
+        system_path="system",
+        block_path="system/root_block",
+        x=640.0,
+        y=120.0,
+        width=300.0,
+        height=100.0,
+    )
+
+    snapshot = service.open_project(project_path)
+
+    assert snapshot.diagram_layouts["system"]["system/root_block"] == (640.0, 120.0, 300.0, 100.0)
+
+
+def test_update_block_layout_rejects_non_direct_children(tmp_path):
+    project_path = tmp_path / "layout-invalid-target-demo.ssp"
+    service = SSPProjectService()
+
+    service.create_project(project_path)
+    with SSP(project_path, mode="a") as ssp:
+        with ssp.system_structure as ssd:
+            nested = System(None, "SuT")
+            nested_component = Component(None)
+            nested_component.name = "nested_block"
+            nested.elements.append(nested_component)
+            ssd.system.elements.append(nested)
+
+    with pytest.raises(ValueError, match="is not a direct child of system system"):
+        service.update_block_layout(
+            project_path,
+            system_path="system",
+            block_path="system/SuT/nested_block",
+            x=420.0,
+            y=260.0,
+        )
 
 
 def test_summarize_fmu_reads_fixture_metadata(tmp_path):
