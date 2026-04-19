@@ -13,7 +13,7 @@ This page is for developers working on `pyssp_interface` locally.
 ```bash
 python3 -m venv venv
 . venv/bin/activate
-python -m pip install --trusted-host pypi.org --trusted-host files.pythonhosted.org -e '.[dev]'
+python -m pip install -r requirements-dev.txt
 ```
 
 ## Run
@@ -22,6 +22,10 @@ python -m pip install --trusted-host pypi.org --trusted-host files.pythonhosted.
 . venv/bin/activate
 pyssp-interface
 ```
+
+If Qt crashes on Wayland during startup, the app now prefers `xcb` automatically
+when both `WAYLAND_DISPLAY` and `DISPLAY` are available. To force native
+Wayland anyway, run with `QT_QPA_PLATFORM=wayland pyssp-interface`.
 
 ## Verify
 

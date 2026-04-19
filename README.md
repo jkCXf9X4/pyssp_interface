@@ -19,7 +19,7 @@ Quick setup:
 ```bash
 python3 -m venv venv
 . venv/bin/activate
-python -m pip install --trusted-host pypi.org --trusted-host files.pythonhosted.org -e '.[dev]'
+python -m pip install -r requirements-dev.txt
 ```
 
 Run the application:
