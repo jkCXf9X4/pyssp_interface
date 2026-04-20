@@ -13,11 +13,23 @@ The application is currently split into a few concrete layers:
 - `state/project_state.py`
   - defines UI-facing summary objects
   - represents recursive SSD structure through `StructureNode`
+- `state/project_index.py`
+  - owns snapshot traversal and project lookup helpers
+  - centralizes connector/connection/path lookups and table payload generation
 - `widgets/project_tree.py`
   - renders the nested project and SSD tree
   - keeps tree payload handling out of `MainWindow`
+- `widgets/table_helpers.py`
+  - owns reusable Qt table setup and row-population helpers
+  - keeps generic table wiring out of `MainWindow`
 - `presentation/formatters.py`
   - owns text-formatting for inspector/detail panels
+- `presentation/selection_plans.py`
+  - owns tree and table selection presentation decisions
+  - keeps large selection branching out of `MainWindow`
+- `presentation/resource_plans.py`
+  - owns SSV/SSM resource table presentation state
+  - keeps resource-table display branching out of `MainWindow`
 - `diagram_controller.py`
   - owns diagram selection state, connection-creation flow, and layout coordination
   - keeps diagram interaction rules out of `MainWindow`
@@ -60,10 +72,22 @@ Planned direction:
 
 ## Current Constraints
 
-- `MainWindow` still owns broad selection/details orchestration even though diagram-specific state moved out
+- `MainWindow` still owns substantial action orchestration and resource mutation flows
 - diagram layout is still in-memory only and not persisted
 - service/controller tests are stronger than UI tests
 - parameter binding editing is still shallow
+
+## Maintenance Rules
+
+The repo also has a focused guideline page: [Code guidelines](code_guidelines.md).
+
+The short version:
+
+- keep modules small enough to scan quickly
+- move traversal helpers out of widgets and windows
+- move branching selection logic into focused presenter/controller modules
+- keep generic table logic shared
+- split files when they start mixing domain rules, rendering, and lookup logic
 
 ## Next Refactor Targets
 

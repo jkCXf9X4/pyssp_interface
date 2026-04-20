@@ -10,3 +10,4 @@ This repository contains a Python desktop application for inspecting and authori
 
 - [Implementation plan](dev/implementation_plan.md)
 - [Architecture](dev/architecture.md)
+- [Code guidelines](dev/code_guidelines.md)

@@ -2,9 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import QSignalBlocker, Qt
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
-    QAbstractItemView,
     QFileDialog,
     QInputDialog,
     QListWidget,
@@ -19,15 +18,33 @@ from PySide6.QtWidgets import (
 
 from pyssp_interface.diagram_controller import DiagramController
 from pyssp_interface.diagram_view import DiagramView
+from pyssp_interface.dialogs.resource_dialogs import (
+    prompt_add_resource_row,
+    prompt_edit_resource_row,
+)
 from pyssp_interface.presentation.formatters import (
-    format_component_summary,
     format_connection_summary,
-    format_connector_summary,
-    format_fmu_summary,
     format_project_summary,
-    format_system_summary,
+)
+from pyssp_interface.presentation.selection_plans import (
+    SelectionPlan,
+    build_component_selection_plan,
+    build_connection_selection_plan,
+    build_connector_selection_plan,
+    build_resource_row_selection_plan,
+    build_tree_selection_plan,
+)
+from pyssp_interface.presentation.resource_plans import (
+    build_ssm_resource_plan,
+    build_ssv_resource_plan,
+)
+from pyssp_interface.resource_controller import (
+    ResourceController,
+    SSMMappingInput,
+    SSVParameterInput,
 )
 from pyssp_interface.services.project_service import SSPProjectService
+from pyssp_interface.state.project_index import ProjectIndex
 from pyssp_interface.state.project_state import (
     ComponentSummary,
     ConnectionSummary,
@@ -38,6 +55,7 @@ from pyssp_interface.state.project_state import (
     SSVParameterSummary,
     StructureNode,
 )
+from pyssp_interface.widgets.table_helpers import create_table, set_table_headers, set_table_rows
 from pyssp_interface.widgets.project_tree import ProjectTreeWidget
 
 
@@ -46,8 +64,10 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.project_service = project_service or SSPProjectService()
         self.project: ProjectSnapshot | None = None
+        self.project_index = ProjectIndex(None)
         self.repo_root = Path(__file__).resolve().parents[2]
         self.diagram_controller = DiagramController()
+        self.resource_controller = ResourceController()
         self._component_table_payloads: list[dict] = []
         self._connector_table_payloads: list[dict] = []
         self._connection_table_payloads: list[dict] = []
@@ -70,23 +90,23 @@ class MainWindow(QMainWindow):
         self.diagram_view.endpointActivated.connect(self._handle_diagram_endpoint_activation)
         self.diagram_view.connectionActivated.connect(self._handle_diagram_connection_activation)
 
-        self.variable_table = self._create_table(
+        self.variable_table = create_table(
             ["FMU", "Name", "Causality", "Variability", "Type", "Description"]
         )
-        self.resource_table = self._create_table(["Name", "Type", "Value"])
+        self.resource_table = create_table(["Name", "Type", "Value"])
         self.resource_table.itemSelectionChanged.connect(self._handle_resource_table_selection)
         self.resource_table.itemChanged.connect(self._handle_resource_table_edit)
-        self.component_table = self._create_table(
+        self.component_table = create_table(
             ["Name", "Source", "Type", "Implementation", "Connectors"]
         )
         self.component_table.itemSelectionChanged.connect(self._handle_component_table_selection)
         self.component_table.itemChanged.connect(self._handle_component_table_edit)
-        self.connector_table = self._create_table(
+        self.connector_table = create_table(
             ["Owner", "Owner Kind", "Name", "Kind", "Type"]
         )
         self.connector_table.itemSelectionChanged.connect(self._handle_connector_table_selection)
         self.connector_table.itemChanged.connect(self._handle_connector_table_edit)
-        self.connection_table = self._create_table(
+        self.connection_table = create_table(
             ["Source Element", "Source Connector", "Target Element", "Target Connector"]
         )
         self.connection_table.itemSelectionChanged.connect(self._handle_connection_table_selection)
@@ -442,7 +462,7 @@ class MainWindow(QMainWindow):
             )
             return
 
-        node = self._find_structure_node(element_path)
+        node = self.project_index.find_structure_node(element_path)
         if node is None:
             return
 
@@ -715,56 +735,21 @@ class MainWindow(QMainWindow):
             )
             return
 
-        resource_name = context["resource_name"]
-        if context["kind"] == "ssv":
-            name, ok = QInputDialog.getText(self, "Add SSV Parameter", "Parameter name:")
-            if not ok or not name.strip():
-                return
-            type_name, ok = QInputDialog.getItem(
-                self,
-                "Add SSV Parameter",
-                "Parameter type:",
-                ["Real", "Integer", "Boolean", "String"],
-                editable=False,
-            )
-            if not ok:
-                return
-            value, ok = QInputDialog.getText(self, "Add SSV Parameter", "Value:")
-            if not ok:
-                return
-            try:
-                rows = self.project_service.add_ssv_parameter(
-                    self.project.project_path,
-                    resource_name=resource_name,
-                    name=name,
-                    type_name=type_name,
-                    value=value,
-                )
-            except Exception as exc:
-                QMessageBox.critical(self, "Add SSV parameter failed", str(exc))
-                return
-            self._show_ssv_resource(resource_name, rows)
-            self.statusBar().showMessage(f"Added SSV parameter {name.strip()}")
-            return
-
-        source, ok = QInputDialog.getText(self, "Add SSM Mapping", "Source:")
-        if not ok or not source.strip():
-            return
-        target, ok = QInputDialog.getText(self, "Add SSM Mapping", "Target:")
-        if not ok or not target.strip():
+        value = prompt_add_resource_row(self, context)
+        if value is None:
             return
         try:
-            rows = self.project_service.add_ssm_mapping(
-                self.project.project_path,
-                resource_name=resource_name,
-                source=source,
-                target=target,
+            result = self.resource_controller.add_row(
+                project_service=self.project_service,
+                project_path=self.project.project_path,
+                context=context,
+                value=value,
             )
         except Exception as exc:
-            QMessageBox.critical(self, "Add SSM mapping failed", str(exc))
+            title = "Add SSV parameter failed" if context["kind"] == "ssv" else "Add SSM mapping failed"
+            QMessageBox.critical(self, title, str(exc))
             return
-        self._show_ssm_resource(resource_name, rows)
-        self.statusBar().showMessage("Added SSM mapping")
+        self._apply_resource_mutation_result(result)
 
     def _edit_selected_resource_row(self) -> None:
         if self.project is None:
@@ -781,90 +766,22 @@ class MainWindow(QMainWindow):
             )
             return
 
-        resource_name = context["resource_name"]
-        if context["kind"] == "ssv":
-            name, ok = QInputDialog.getText(
-                self,
-                "Edit SSV Parameter",
-                "Parameter name:",
-                text=payload["name"],
-            )
-            if not ok or not name.strip():
-                return
-            type_options = ["Real", "Integer", "Boolean", "String"]
-            type_name, ok = QInputDialog.getItem(
-                self,
-                "Edit SSV Parameter",
-                "Parameter type:",
-                type_options,
-                type_options.index(payload["type_name"]) if payload["type_name"] in type_options else 0,
-                editable=False,
-            )
-            if not ok:
-                return
-            value, ok = QInputDialog.getText(
-                self,
-                "Edit SSV Parameter",
-                "Value:",
-                text=payload.get("value", "") or "",
-            )
-            if not ok:
-                return
-            try:
-                rows = self.project_service.update_ssv_parameter(
-                    self.project.project_path,
-                    resource_name=resource_name,
-                    name=payload["name"],
-                    new_name=name,
-                    type_name=type_name,
-                    value=value,
-                )
-            except Exception as exc:
-                QMessageBox.critical(self, "Edit SSV parameter failed", str(exc))
-                return
-            self._show_ssv_resource(resource_name, rows)
-            self.statusBar().showMessage(f"Updated SSV parameter {name.strip()}")
-            return
-
-        source, ok = QInputDialog.getText(
-            self,
-            "Edit SSM Mapping",
-            "Source:",
-            text=payload["source"],
-        )
-        if not ok or not source.strip():
-            return
-        target, ok = QInputDialog.getText(
-            self,
-            "Edit SSM Mapping",
-            "Target:",
-            text=payload["target"],
-        )
-        if not ok or not target.strip():
-            return
-        transformation_type, ok = QInputDialog.getText(
-            self,
-            "Edit SSM Mapping",
-            "Transformation:",
-            text=payload.get("transformation_type") or "",
-        )
-        if not ok:
+        value = prompt_edit_resource_row(self, context, payload)
+        if value is None:
             return
         try:
-            rows = self.project_service.update_ssm_mapping(
-                self.project.project_path,
-                resource_name=resource_name,
-                source=payload["source"],
-                target=payload["target"],
-                new_source=source,
-                new_target=target,
-                transformation_type=transformation_type.strip() or None,
+            result = self.resource_controller.edit_row(
+                project_service=self.project_service,
+                project_path=self.project.project_path,
+                context=context,
+                payload=payload,
+                value=value,
             )
         except Exception as exc:
-            QMessageBox.critical(self, "Edit SSM mapping failed", str(exc))
+            title = "Edit SSV parameter failed" if context["kind"] == "ssv" else "Edit SSM mapping failed"
+            QMessageBox.critical(self, title, str(exc))
             return
-        self._show_ssm_resource(resource_name, rows)
-        self.statusBar().showMessage("Updated SSM mapping")
+        self._apply_resource_mutation_result(result)
 
     def _remove_selected_resource_row(self) -> None:
         if self.project is None:
@@ -881,30 +798,17 @@ class MainWindow(QMainWindow):
             )
             return
 
-        resource_name = context["resource_name"]
         try:
-            if context["kind"] == "ssv":
-                rows = self.project_service.remove_ssv_parameter(
-                    self.project.project_path,
-                    resource_name=resource_name,
-                    name=payload["name"],
-                )
-                self._show_ssv_resource(resource_name, rows)
-                self.statusBar().showMessage(f"Removed SSV parameter {payload['name']}")
-                return
-
-            rows = self.project_service.remove_ssm_mapping(
-                self.project.project_path,
-                resource_name=resource_name,
-                source=payload["source"],
-                target=payload["target"],
+            result = self.resource_controller.remove_row(
+                project_service=self.project_service,
+                project_path=self.project.project_path,
+                context=context,
+                payload=payload,
             )
         except Exception as exc:
             QMessageBox.critical(self, "Remove resource row failed", str(exc))
             return
-
-        self._show_ssm_resource(resource_name, rows)
-        self.statusBar().showMessage("Removed SSM mapping")
+        self._apply_resource_mutation_result(result)
 
     def _handle_component_table_edit(self, item: QTableWidgetItem) -> None:
         if self._is_populating_tables or self.project is None:
@@ -913,7 +817,7 @@ class MainWindow(QMainWindow):
         payload = self._component_table_payload_at_row(item.row())
         if payload is None:
             return
-        node = self._find_structure_node(payload.get("path"))
+        node = self.project_index.find_structure_node(payload.get("path"))
         if node is None:
             return
 
@@ -958,7 +862,7 @@ class MainWindow(QMainWindow):
         payload = self._selected_connector_payload_for_row(item.row())
         if payload is None:
             return
-        connector = self._find_connector(payload.get("owner_path"), payload.get("name"))
+        connector = self.project_index.find_connector(payload.get("owner_path"), payload.get("name"))
         if connector is None or connector.owner_kind != "system":
             self._update_details()
             return
@@ -998,7 +902,7 @@ class MainWindow(QMainWindow):
         payload = self._connection_table_payload_at_row(item.row())
         if payload is None:
             return
-        connection = self._find_connection(payload.get("owner_path"), payload.get("key"))
+        connection = self.project_index.find_connection(payload.get("owner_path"), payload.get("key"))
         if connection is None:
             return
 
@@ -1065,64 +969,39 @@ class MainWindow(QMainWindow):
         if context is None or payload is None:
             return
 
-        resource_name = context["resource_name"]
+        value: SSVParameterInput | SSMMappingInput
         if context["kind"] == "ssv":
-            new_name = self._table_text(self.resource_table, item.row(), 0)
-            type_name = self._table_text(self.resource_table, item.row(), 1)
-            value = self._table_text(self.resource_table, item.row(), 2)
-            if (
-                new_name == payload["name"]
-                and type_name == payload["type_name"]
-                and value == (payload.get("value") or "")
-            ):
-                return
-            try:
-                rows = self.project_service.update_ssv_parameter(
-                    self.project.project_path,
-                    resource_name=resource_name,
-                    name=payload["name"],
-                    new_name=new_name,
-                    type_name=type_name,
-                    value=value,
-                )
-            except Exception as exc:
-                QMessageBox.critical(self, "Edit SSV parameter failed", str(exc))
-                self._restore_resource_table(resource_name, "ssv")
-                return
-            self._show_ssv_resource(resource_name, rows)
-            self._select_ssv_row(new_name)
-            self.statusBar().showMessage(f"Updated SSV parameter {new_name}")
-            return
-
-        new_source = self._table_text(self.resource_table, item.row(), 0)
-        new_target = self._table_text(self.resource_table, item.row(), 1)
-        transformation_type = self._optional_table_text(self.resource_table, item.row(), 2)
-        if (
-            new_source == payload["source"]
-            and new_target == payload["target"]
-            and transformation_type == payload.get("transformation_type")
-        ):
-            return
+            value = SSVParameterInput(
+                name=self._table_text(self.resource_table, item.row(), 0),
+                type_name=self._table_text(self.resource_table, item.row(), 1),
+                value=self._table_text(self.resource_table, item.row(), 2),
+            )
+        else:
+            value = SSMMappingInput(
+                source=self._table_text(self.resource_table, item.row(), 0),
+                target=self._table_text(self.resource_table, item.row(), 1),
+                transformation_type=self._optional_table_text(self.resource_table, item.row(), 2),
+            )
         try:
-            rows = self.project_service.update_ssm_mapping(
-                self.project.project_path,
-                resource_name=resource_name,
-                source=payload["source"],
-                target=payload["target"],
-                new_source=new_source,
-                new_target=new_target,
-                transformation_type=transformation_type,
+            result = self.resource_controller.update_row_from_table(
+                project_service=self.project_service,
+                project_path=self.project.project_path,
+                context=context,
+                payload=payload,
+                value=value,
             )
         except Exception as exc:
-            QMessageBox.critical(self, "Edit SSM mapping failed", str(exc))
-            self._restore_resource_table(resource_name, "ssm")
+            title = "Edit SSV parameter failed" if context["kind"] == "ssv" else "Edit SSM mapping failed"
+            QMessageBox.critical(self, title, str(exc))
+            self._restore_resource_table(context["resource_name"], context["kind"])
             return
-        self._show_ssm_resource(resource_name, rows)
-        self._select_ssm_row(new_source, new_target)
-        self.statusBar().showMessage("Updated SSM mapping")
+        if result is None:
+            return
+        self._apply_resource_mutation_result(result)
 
     def _load_snapshot(self, snapshot: ProjectSnapshot) -> None:
         self.project = snapshot
+        self.project_index = ProjectIndex(snapshot)
         self.diagram_controller.reset(snapshot.diagram_layouts)
         self._resource_table_context = None
         self.setWindowTitle(f"pyssp_interface - {snapshot.project_name}")
@@ -1136,6 +1015,81 @@ class MainWindow(QMainWindow):
             highlight_path=snapshot.structure_tree.path if snapshot.structure_tree else None,
         )
         self.explorer_tabs.setCurrentWidget(self.details_panel)
+
+    def _apply_selection_plan(self, plan: SelectionPlan) -> None:
+        if plan.resource_view is not None:
+            resource_kind, resource_name = plan.resource_view
+            if resource_kind == "ssv":
+                self._show_ssv_resource(resource_name)
+            else:
+                self._show_ssm_resource(resource_name)
+            return
+
+        if plan.details_text is not None:
+            self.details_panel.setPlainText(plan.details_text)
+
+        if plan.variables is not None:
+            self._populate_variables(plan.variables)
+
+        if plan.components is not None:
+            self._component_table_payloads = plan.component_payloads or []
+            self._populate_component_table(plan.components)
+
+        if plan.connectors is not None:
+            self._connector_table_payloads = plan.connector_payloads or []
+            self._populate_connector_table(plan.connectors)
+
+        if plan.connections is not None:
+            self._connection_table_payloads = plan.connection_payloads or []
+            self._populate_connection_table(plan.connections)
+
+        if plan.render_diagram:
+            self._render_diagram(
+                plan.diagram_node,
+                highlight_path=plan.diagram_highlight_path,
+            )
+        elif plan.clear_diagram_highlight:
+            self.diagram_view.set_highlighted_path(None)
+
+        if plan.explorer_tab == "variables":
+            self.explorer_tabs.setCurrentWidget(self.variable_table)
+        elif plan.explorer_tab == "resource":
+            self.explorer_tabs.setCurrentWidget(self.resource_table)
+        elif plan.explorer_tab == "structure":
+            self.explorer_tabs.setCurrentWidget(self.structure_tabs)
+            if plan.structure_tab == "components":
+                self.structure_tabs.setCurrentWidget(self.component_table)
+            elif plan.structure_tab == "connectors":
+                self.structure_tabs.setCurrentWidget(self.connector_table)
+            elif plan.structure_tab == "connections":
+                self.structure_tabs.setCurrentWidget(self.connection_table)
+        else:
+            self.explorer_tabs.setCurrentWidget(self.details_panel)
+
+    def _apply_resource_table_plan(self, plan) -> None:
+        self._resource_table_context = {
+            "resource_name": plan.resource_name,
+            "kind": plan.kind,
+            "rows": plan.row_payloads,
+        }
+        self.details_panel.setPlainText(plan.details_text)
+        set_table_headers(self.resource_table, plan.headers)
+        self._populate_resource_table(
+            plan.rows,
+            editable_columns=plan.editable_columns,
+        )
+        self.explorer_tabs.setCurrentWidget(self.resource_table)
+
+    def _apply_resource_mutation_result(self, result) -> None:
+        if result.kind == "ssv":
+            self._show_ssv_resource(result.resource_name, result.rows)
+            if result.selection:
+                self._select_ssv_row(result.selection[0])
+        else:
+            self._show_ssm_resource(result.resource_name, result.rows)
+            if len(result.selection) == 2:
+                self._select_ssm_row(result.selection[0], result.selection[1])
+        self.statusBar().showMessage(result.message)
 
     def _populate_validation(self, snapshot: ProjectSnapshot) -> None:
         self.validation_panel.clear()
@@ -1167,300 +1121,72 @@ class MainWindow(QMainWindow):
         connectors: list[ConnectorSummary],
         connections: list[ConnectionSummary],
     ) -> None:
-        self._component_table_payloads = self._component_payloads()
-        self._connector_table_payloads = self._connector_payloads()
-        self._connection_table_payloads = self._connection_payloads()
+        self._component_table_payloads = self.project_index.component_payloads()
+        self._connector_table_payloads = self.project_index.connector_payloads(connectors)
+        self._connection_table_payloads = self.project_index.connection_payloads(connections)
         self._populate_component_table(components)
         self._populate_connector_table(connectors)
         self._populate_connection_table(connections)
 
     def _handle_resource_table_selection(self) -> None:
-        context = self._resource_editor_context()
-        payload = self._selected_resource_row_payload()
-        if context is None or payload is None:
-            return
-        if context["kind"] == "ssv":
-            self.details_panel.setPlainText(
-                "\n".join(
-                    [
-                        "SSV Parameter",
-                        f"resource: {context['resource_name']}",
-                        f"name: {payload['name']}",
-                        f"type: {payload['type_name']}",
-                        f"value: {payload.get('value') or '-'}",
-                    ]
-                )
+        self._apply_selection_plan(
+            build_resource_row_selection_plan(
+                self._resource_editor_context(),
+                self._selected_resource_row_payload(),
             )
-        else:
-            self.details_panel.setPlainText(
-                "\n".join(
-                    [
-                        "SSM Mapping",
-                        f"resource: {context['resource_name']}",
-                        f"source: {payload['source']}",
-                        f"target: {payload['target']}",
-                        f"transformation: {payload.get('transformation_type') or '-'}",
-                    ]
-                )
-            )
-        self.explorer_tabs.setCurrentWidget(self.resource_table)
+        )
 
     def _handle_component_table_selection(self) -> None:
         payload = self._selected_component_table_payload()
         if payload is None:
             return
-        node = self._find_structure_node(payload.get("path"))
-        if node is None:
-            return
-        component = ComponentSummary(
-            name=node.name,
-            source=node.source,
-            component_type=node.component_type,
-            implementation=node.implementation,
-            connector_count=len(node.connectors),
+        self._apply_selection_plan(
+            build_component_selection_plan(
+                self.project_index,
+                self.project_index.find_structure_node(payload.get("path")),
+            )
         )
-        self.details_panel.setPlainText(format_component_summary(component))
-        parent_system = self._find_parent_system(node.path)
-        self._render_diagram(parent_system, highlight_path=node.path)
-        self.explorer_tabs.setCurrentWidget(self.structure_tabs)
-        self.structure_tabs.setCurrentWidget(self.component_table)
 
     def _handle_connector_table_selection(self) -> None:
         payload = self._selected_connector_table_payload()
         if payload is None:
             return
-        connector = self._find_connector(payload.get("owner_path"), payload.get("name"))
-        if connector is None:
-            return
-        self.details_panel.setPlainText(format_connector_summary(connector))
-        self._render_diagram(
-            self._diagram_scope_for_path(connector.owner_path),
-            highlight_path=connector.owner_path,
+        self._apply_selection_plan(
+            build_connector_selection_plan(
+                self.project_index,
+                self.project_index.find_connector(payload.get("owner_path"), payload.get("name")),
+            )
         )
-        self.explorer_tabs.setCurrentWidget(self.structure_tabs)
-        self.structure_tabs.setCurrentWidget(self.connector_table)
 
     def _handle_connection_table_selection(self) -> None:
         payload = self._selected_connection_table_payload()
         if payload is None:
             return
-        connection = self._find_connection(payload.get("owner_path"), payload.get("key"))
+        connection = self.project_index.find_connection(payload.get("owner_path"), payload.get("key"))
         if connection is None:
             return
-        self.details_panel.setPlainText(format_connection_summary(connection))
         self.diagram_controller.activate_connection(
             owner_path=connection.owner_path,
             key=payload["key"],
             connection=connection,
         )
-        self._render_diagram(
-            self._find_structure_node(connection.owner_path),
-            highlight_path=connection.owner_path,
+        self._apply_selection_plan(
+            build_connection_selection_plan(
+                self.project_index,
+                connection,
+            )
         )
-        self.explorer_tabs.setCurrentWidget(self.structure_tabs)
-        self.structure_tabs.setCurrentWidget(self.connection_table)
 
     def _update_details(self) -> None:
         if self.project is None:
             return
-
-        payload = self.project_tree.current_payload()
-        kind = payload.get("kind", "unknown")
-
-        if kind == "project":
-            self.details_panel.setPlainText(format_project_summary(self.project))
-            self._populate_variables(self.project.fmus)
-            self._populate_structure(
-                self.project.components,
-                self.project.connectors,
-                self.project.connections,
+        self._apply_selection_plan(
+            build_tree_selection_plan(
+                self.project,
+                self.project_index,
+                self.project_tree.current_payload(),
             )
-            self._render_diagram(
-                self.project.structure_tree,
-                highlight_path=self.project.structure_tree.path if self.project.structure_tree else None,
-            )
-            self.explorer_tabs.setCurrentWidget(self.details_panel)
-            return
-
-        if kind == "resources":
-            self.details_panel.setPlainText(f"{len(self.project.resources)} resources")
-            self.diagram_view.set_highlighted_path(None)
-            self.explorer_tabs.setCurrentWidget(self.details_panel)
-            return
-
-        if kind == "resource":
-            resource_name = payload.get("name")
-            if str(resource_name).lower().endswith(".ssv"):
-                self._show_ssv_resource(resource_name)
-                return
-            if str(resource_name).lower().endswith(".ssm"):
-                self._show_ssm_resource(resource_name)
-                return
-            self.details_panel.setPlainText(payload.get("details", ""))
-            self.diagram_view.set_highlighted_path(None)
-            self.explorer_tabs.setCurrentWidget(self.details_panel)
-            return
-
-        if kind == "fmus":
-            self.details_panel.setPlainText(f"{len(self.project.fmus)} FMUs")
-            self._populate_variables(self.project.fmus)
-            self._render_diagram(self.project.structure_tree, highlight_path=None)
-            self.explorer_tabs.setCurrentWidget(self.variable_table)
-            return
-
-        if kind == "fmu":
-            fmu = next(
-                (item for item in self.project.fmus if item.resource_name == payload.get("name")),
-                None,
-            )
-            if fmu is None:
-                return
-            self.details_panel.setPlainText(format_fmu_summary(fmu))
-            self._set_table_rows(
-                self.variable_table,
-                [
-                    [
-                        fmu.resource_name,
-                        variable.name,
-                        variable.causality,
-                        variable.variability,
-                        variable.type_name,
-                        variable.description or "",
-                    ]
-                    for variable in fmu.variables
-                ],
-            )
-            self._render_diagram(self.project.structure_tree, highlight_path=None)
-            self.explorer_tabs.setCurrentWidget(self.variable_table)
-            return
-
-        if kind == "component":
-            node = self._find_structure_node(payload.get("path"))
-            if node is None:
-                return
-            component = ComponentSummary(
-                name=node.name,
-                source=node.source,
-                component_type=node.component_type,
-                implementation=node.implementation,
-                connector_count=len(node.connectors),
-            )
-            self._component_table_payloads = [{"path": node.path}]
-            self._connector_table_payloads = [
-                {"owner_path": connector.owner_path, "name": connector.name}
-                for connector in node.connectors
-            ]
-            self.details_panel.setPlainText(format_component_summary(component))
-            self._populate_component_table([component])
-            self._populate_connector_table(node.connectors)
-            parent_system = self._find_parent_system(node.path)
-            self._render_diagram(parent_system, highlight_path=node.path)
-            self.explorer_tabs.setCurrentWidget(self.structure_tabs)
-            self.structure_tabs.setCurrentWidget(self.component_table)
-            return
-
-        if kind == "system":
-            node = self._find_structure_node(payload.get("path"))
-            if node is None:
-                return
-            self._connector_table_payloads = [
-                {"owner_path": connector.owner_path, "name": connector.name}
-                for connector in node.connectors
-            ]
-            self._connection_table_payloads = [
-                {
-                    "owner_path": connection.owner_path,
-                    "key": (
-                        connection.start_element,
-                        connection.start_connector,
-                        connection.end_element,
-                        connection.end_connector,
-                    ),
-                }
-                for connection in node.connections
-            ]
-            self.details_panel.setPlainText(format_system_summary(node))
-            self._populate_connector_table(node.connectors)
-            self._populate_connection_table(node.connections)
-            self._render_diagram(node, highlight_path=node.path)
-            self.explorer_tabs.setCurrentWidget(self.structure_tabs)
-            self.structure_tabs.setCurrentWidget(self.connector_table)
-            return
-
-        if kind == "connectors":
-            owner_path = payload.get("owner_path")
-            node = self._find_structure_node(owner_path)
-            connectors = node.connectors if node is not None else []
-            self._connector_table_payloads = [
-                {"owner_path": connector.owner_path, "name": connector.name}
-                for connector in connectors
-            ]
-            self.details_panel.setPlainText(
-                f"{len(connectors)} connectors in {payload.get('owner_name', '-')}"
-            )
-            self._populate_connector_table(connectors)
-            self._render_diagram(self._diagram_scope_for_path(owner_path), highlight_path=owner_path)
-            self.explorer_tabs.setCurrentWidget(self.structure_tabs)
-            self.structure_tabs.setCurrentWidget(self.connector_table)
-            return
-
-        if kind == "connector":
-            connector = self._find_connector(payload.get("owner_path"), payload.get("name"))
-            if connector is None:
-                return
-            self._connector_table_payloads = [
-                {"owner_path": connector.owner_path, "name": connector.name}
-            ]
-            self.details_panel.setPlainText(format_connector_summary(connector))
-            self._populate_connector_table([connector])
-            self._render_diagram(
-                self._diagram_scope_for_path(payload.get("owner_path")),
-                highlight_path=payload.get("owner_path"),
-            )
-            self.explorer_tabs.setCurrentWidget(self.structure_tabs)
-            self.structure_tabs.setCurrentWidget(self.connector_table)
-            return
-
-        if kind == "connections":
-            owner_path = payload.get("owner_path")
-            node = self._find_structure_node(owner_path)
-            connections = node.connections if node is not None else []
-            self._connection_table_payloads = [
-                {
-                    "owner_path": connection.owner_path,
-                    "key": (
-                        connection.start_element,
-                        connection.start_connector,
-                        connection.end_element,
-                        connection.end_connector,
-                    ),
-                }
-                for connection in connections
-            ]
-            self.details_panel.setPlainText(
-                f"{len(connections)} connections in {payload.get('owner_name', '-')}"
-            )
-            self._populate_connection_table(connections)
-            self._render_diagram(self._diagram_scope_for_path(owner_path), highlight_path=owner_path)
-            self.explorer_tabs.setCurrentWidget(self.structure_tabs)
-            self.structure_tabs.setCurrentWidget(self.connection_table)
-            return
-
-        if kind == "connection":
-            connection = self._find_connection(payload.get("owner_path"), payload.get("key"))
-            if connection is None:
-                return
-            self._connection_table_payloads = [
-                {"owner_path": connection.owner_path, "key": payload.get("key")}
-            ]
-            self.details_panel.setPlainText(format_connection_summary(connection))
-            self._populate_connection_table([connection])
-            self._render_diagram(
-                self._find_structure_node(payload.get("owner_path")),
-                highlight_path=payload.get("owner_path"),
-            )
-            self.explorer_tabs.setCurrentWidget(self.structure_tabs)
-            self.structure_tabs.setCurrentWidget(self.connection_table)
+        )
 
     def _selected_fmu_resource_name(self) -> str | None:
         payload = self.project_tree.current_payload()
@@ -1484,13 +1210,13 @@ class MainWindow(QMainWindow):
             return self._parent_path(payload.get("path")) or root_path
         if kind in {"connectors", "connections"}:
             owner_path = payload.get("owner_path")
-            node = self._find_structure_node(owner_path)
+            node = self.project_index.find_structure_node(owner_path)
             if node is not None and node.node_kind == "system":
                 return owner_path
             return self._parent_path(owner_path) or root_path
         if kind == "connector":
             owner_path = payload.get("owner_path")
-            connector = self._find_connector(owner_path, payload.get("name"))
+            connector = self.project_index.find_connector(owner_path, payload.get("name"))
             if connector is not None and connector.owner_kind == "system":
                 return owner_path
             return self._parent_path(owner_path) or root_path
@@ -1502,89 +1228,10 @@ class MainWindow(QMainWindow):
         return self._connection_endpoint_items_for_system(self._current_system_scope_path())
 
     def _connection_endpoint_items_for_system(self, system_path: str | None) -> list[str]:
-        node = self._find_structure_node(system_path)
-        if node is None or node.node_kind != "system":
-            return []
-
-        labels = [
-            self._format_endpoint_label(node.path, connector.name)
-            for connector in node.connectors
+        return [
+            self._format_endpoint_label(owner_path, connector_name)
+            for owner_path, connector_name in self.project_index.endpoint_pairs_for_system(system_path)
         ]
-        for child in node.children:
-            labels.extend(
-                self._format_endpoint_label(child.path, connector.name)
-                for connector in child.connectors
-            )
-        return labels
-
-    def _find_structure_node(self, path: str | None) -> StructureNode | None:
-        if self.project is None or self.project.structure_tree is None or not path:
-            return None
-
-        def visit(node: StructureNode) -> StructureNode | None:
-            if node.path == path:
-                return node
-            for child in node.children:
-                found = visit(child)
-                if found is not None:
-                    return found
-            return None
-
-        return visit(self.project.structure_tree)
-
-    def _find_parent_system(self, path: str | None) -> StructureNode | None:
-        if self.project is None or self.project.structure_tree is None:
-            return None
-        if not path:
-            return self.project.structure_tree
-
-        node = self._find_structure_node(path)
-        if node is not None and node.node_kind == "system":
-            return node
-
-        parent_path = self._parent_path(path)
-        return self._find_structure_node(parent_path) if parent_path else self.project.structure_tree
-
-    def _diagram_scope_for_path(self, path: str | None) -> StructureNode | None:
-        node = self._find_structure_node(path)
-        if node is not None and node.node_kind == "system":
-            return node
-        return self._find_parent_system(path)
-
-    def _find_connector(self, owner_path: str | None, name: str | None) -> ConnectorSummary | None:
-        if self.project is None or owner_path is None or name is None:
-            return None
-        return next(
-            (
-                item
-                for item in self.project.connectors
-                if item.owner_path == owner_path and item.name == name
-            ),
-            None,
-        )
-
-    def _find_connection(
-        self,
-        owner_path: str | None,
-        key: tuple[str | None, str, str | None, str] | None,
-    ) -> ConnectionSummary | None:
-        if self.project is None or owner_path is None or key is None:
-            return None
-        return next(
-            (
-                item
-                for item in self.project.connections
-                if item.owner_path == owner_path
-                and (
-                    item.start_element,
-                    item.start_connector,
-                    item.end_element,
-                    item.end_connector,
-                )
-                == key
-            ),
-            None,
-        )
 
     def _select_tree_path_from_diagram(self, path: str) -> None:
         item = self.project_tree.find_item_by_path(path)
@@ -1616,7 +1263,7 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage(result.message)
         if result.snapshot is not None and system_path is not None:
             self._load_snapshot(result.snapshot)
-            selected_system = self._find_structure_node(system_path)
+            selected_system = self.project_index.find_structure_node(system_path)
             self._render_diagram(selected_system, highlight_path=system_path)
 
     def _handle_diagram_connection_activation(
@@ -1624,7 +1271,7 @@ class MainWindow(QMainWindow):
         owner_path: str,
         key: tuple[str | None, str, str | None, str],
     ) -> None:
-        connection = self._find_connection(owner_path, key)
+        connection = self.project_index.find_connection(owner_path, key)
         if connection is None:
             return
         message = self.diagram_controller.activate_connection(
@@ -1664,7 +1311,7 @@ class MainWindow(QMainWindow):
                 )
             except Exception as exc:
                 QMessageBox.critical(self, "Persist layout failed", str(exc))
-        current_node = self._find_structure_node(system_path)
+        current_node = self.project_index.find_structure_node(system_path)
         if current_node is None:
             return
         self._render_diagram(current_node, highlight_path=self._current_diagram_highlight_path())
@@ -1687,15 +1334,11 @@ class MainWindow(QMainWindow):
         )
 
     def _root_system_path(self) -> str | None:
-        if self.project is None or self.project.structure_tree is None:
-            return None
-        return self.project.structure_tree.path
+        return self.project_index.root_system_path()
 
     @staticmethod
     def _parent_path(path: str | None) -> str | None:
-        if not path or "/" not in path:
-            return None
-        return path.rsplit("/", 1)[0]
+        return ProjectIndex.parent_path(path)
 
     @staticmethod
     def _format_endpoint_label(owner_path: str, connector_name: str) -> str:
@@ -1818,26 +1461,26 @@ class MainWindow(QMainWindow):
     def _selected_connection_for_removal(self) -> ConnectionSummary | None:
         if self.diagram_controller.selected_connection is not None:
             owner_path, key = self.diagram_controller.selected_connection
-            return self._find_connection(owner_path, key)
+            return self.project_index.find_connection(owner_path, key)
 
         payload = self._selected_connection_table_payload()
         if payload is not None:
-            return self._find_connection(payload.get("owner_path"), payload.get("key"))
+            return self.project_index.find_connection(payload.get("owner_path"), payload.get("key"))
 
         payload = self.project_tree.current_payload()
         if payload.get("kind") != "connection":
             return None
-        return self._find_connection(payload.get("owner_path"), payload.get("key"))
+        return self.project_index.find_connection(payload.get("owner_path"), payload.get("key"))
 
     def _selected_connector_for_editing(self) -> ConnectorSummary | None:
         payload = self._selected_connector_table_payload()
         if payload is not None:
-            return self._find_connector(payload.get("owner_path"), payload.get("name"))
+            return self.project_index.find_connector(payload.get("owner_path"), payload.get("name"))
 
         payload = self.project_tree.current_payload()
         if payload.get("kind") != "connector":
             return None
-        return self._find_connector(payload.get("owner_path"), payload.get("name"))
+        return self.project_index.find_connector(payload.get("owner_path"), payload.get("name"))
 
     def _selected_resource_row_payload(self) -> dict | None:
         return self._resource_row_payload_at_row(self.resource_table.currentRow())
@@ -1905,44 +1548,6 @@ class MainWindow(QMainWindow):
             return None
         return self._connection_table_payloads[row]
 
-    def _component_payloads(self) -> list[dict]:
-        if self.project is None or self.project.structure_tree is None:
-            return []
-        payloads: list[dict] = []
-
-        def visit(node: StructureNode) -> None:
-            for child in node.children:
-                if child.node_kind == "component":
-                    payloads.append({"path": child.path})
-                visit(child)
-
-        visit(self.project.structure_tree)
-        return payloads
-
-    def _connector_payloads(self) -> list[dict]:
-        if self.project is None:
-            return []
-        return [
-            {"owner_path": connector.owner_path, "name": connector.name}
-            for connector in self.project.connectors
-        ]
-
-    def _connection_payloads(self) -> list[dict]:
-        if self.project is None:
-            return []
-        return [
-            {
-                "owner_path": connection.owner_path,
-                "key": (
-                    connection.start_element,
-                    connection.start_connector,
-                    connection.end_element,
-                    connection.end_connector,
-                ),
-            }
-            for connection in self.project.connections
-        ]
-
     def _show_ssv_resource(
         self,
         resource_name: str,
@@ -1956,29 +1561,7 @@ class MainWindow(QMainWindow):
                 resource_name=resource_name,
             )
         )
-        self._resource_table_context = {
-            "resource_name": resource_name,
-            "kind": "ssv",
-            "rows": [
-                {"name": row.name, "type_name": row.type_name, "value": row.value}
-                for row in rows
-            ],
-        }
-        self.details_panel.setPlainText(
-            "\n".join(
-                [
-                    "SSV Resource",
-                    f"resource: {resource_name}",
-                    f"parameters: {len(rows)}",
-                ]
-            )
-        )
-        self._set_table_headers(self.resource_table, ["Name", "Type", "Value"])
-        self._populate_resource_table(
-            [[row.name, row.type_name, row.value or ""] for row in rows],
-            editable_columns={0, 1, 2},
-        )
-        self.explorer_tabs.setCurrentWidget(self.resource_table)
+        self._apply_resource_table_plan(build_ssv_resource_plan(resource_name, rows))
 
     def _show_ssm_resource(
         self,
@@ -1993,33 +1576,7 @@ class MainWindow(QMainWindow):
                 resource_name=resource_name,
             )
         )
-        self._resource_table_context = {
-            "resource_name": resource_name,
-            "kind": "ssm",
-            "rows": [
-                {
-                    "source": row.source,
-                    "target": row.target,
-                    "transformation_type": row.transformation_type,
-                }
-                for row in rows
-            ],
-        }
-        self.details_panel.setPlainText(
-            "\n".join(
-                [
-                    "SSM Resource",
-                    f"resource: {resource_name}",
-                    f"mappings: {len(rows)}",
-                ]
-            )
-        )
-        self._set_table_headers(self.resource_table, ["Source", "Target", "Transformation"])
-        self._populate_resource_table(
-            [[row.source, row.target, row.transformation_type or ""] for row in rows],
-            editable_columns={0, 1, 2},
-        )
-        self.explorer_tabs.setCurrentWidget(self.resource_table)
+        self._apply_resource_table_plan(build_ssm_resource_plan(resource_name, rows))
 
     @staticmethod
     def _component_row(component: ComponentSummary) -> list[str]:
@@ -2050,26 +1607,6 @@ class MainWindow(QMainWindow):
             connection.end_connector,
         ]
 
-    @staticmethod
-    def _create_table(headers: list[str]) -> QTableWidget:
-        table = QTableWidget(0, len(headers))
-        table.setHorizontalHeaderLabels(headers)
-        table.setEditTriggers(
-            QAbstractItemView.DoubleClicked
-            | QAbstractItemView.EditKeyPressed
-            | QAbstractItemView.SelectedClicked
-        )
-        table.setSelectionBehavior(QTableWidget.SelectRows)
-        table.setSelectionMode(QTableWidget.SingleSelection)
-        table.setAlternatingRowColors(True)
-        table.horizontalHeader().setStretchLastSection(True)
-        return table
-
-    @staticmethod
-    def _set_table_headers(table: QTableWidget, headers: list[str]) -> None:
-        table.setColumnCount(len(headers))
-        table.setHorizontalHeaderLabels(headers)
-
     def _set_table_rows(
         self,
         table: QTableWidget,
@@ -2078,21 +1615,16 @@ class MainWindow(QMainWindow):
         editable_columns: set[int] | None = None,
         editable_rows: set[int] | None = None,
     ) -> None:
-        editable_columns = editable_columns or set()
-        editable_rows = editable_rows if editable_rows is not None else set(range(len(rows)))
         self._is_populating_tables = True
-        blocker = QSignalBlocker(table)
-        table.setRowCount(len(rows))
-        table.clearContents()
-        for row_index, row in enumerate(rows):
-            for col_index, value in enumerate(row):
-                item = QTableWidgetItem(value)
-                if col_index not in editable_columns or row_index not in editable_rows:
-                    item.setFlags(item.flags() & ~Qt.ItemIsEditable)
-                table.setItem(row_index, col_index, item)
-        table.resizeColumnsToContents()
-        del blocker
-        self._is_populating_tables = False
+        try:
+            set_table_rows(
+                table,
+                rows,
+                editable_columns=editable_columns,
+                editable_rows=editable_rows,
+            )
+        finally:
+            self._is_populating_tables = False
 
     def _populate_component_table(self, components: list[ComponentSummary]) -> None:
         self._set_table_rows(
